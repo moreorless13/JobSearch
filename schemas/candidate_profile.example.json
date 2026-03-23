@@ -1,0 +1,52 @@
+{
+  "candidate_name": "YOUR_NAME",
+  "home_base": "City, State",
+  "location_rules": {
+    "allow_remote": true,
+    "radius_miles": 25,
+    "origin": "City, State"
+  },
+  "salary_floor": 20,
+  "target_roles": [
+    "Solutions Engineer",
+    "Solutions Architect",
+    "Technical Account Manager",
+    "Integration Engineer",
+    "Implementation Manager",
+    "Technical Program Manager",
+    "Product Solutions Consultant",
+    "Customer Solutions Engineer",
+    "Technical Consultant",
+    "Sales Engineer"
+  ],
+  "target_industries": [
+    "FinTech",
+    "Payments",
+    "SaaS",
+    "Healthcare Technology",
+    "Enterprise Software",
+    "API Platforms",
+    "B2B Software",
+    "Healthcare",
+    "Financial Technology"
+  ],
+  "keywords": [
+    "API",
+    "integrations",
+    "implementation",
+    "solutions engineering",
+    "payments",
+    "fintech",
+    "technical consulting",
+    "client onboarding",
+    "stakeholder management",
+    "documentation",
+    "Postman",
+    "JIRA",
+    "GraphQL",
+    "TypeScript",
+    "React",
+    "JWT"
+  ],
+  "sheet_url": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit"
+}

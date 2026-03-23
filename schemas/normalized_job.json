@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NormalizedJob",
+  "type": "object",
+  "properties": {
+    "company": { "type": ["string", "null"] },
+    "role_title": { "type": ["string", "null"] },
+    "location": { "type": ["string", "null"] },
+    "source": {
+      "type": ["string", "null"],
+      "enum": [
+        "linkedin",
+        "indeed",
+        "ziprecruiter",
+        "greenhouse",
+        "lever",
+        "workday",
+        "ashby",
+        "smartrecruiters",
+        "google_jobs",
+        "company_sites",
+        null
+      ]
+    },
+    "posting_url": { "type": ["string", "null"], "format": "uri" },
+    "careers_url": { "type": ["string", "null"], "format": "uri" },
+    "salary_min": { "type": ["integer", "null"] },
+    "salary_max": { "type": ["integer", "null"] },
+    "salary_currency": { "type": ["string", "null"] },
+    "remote_or_local": {
+      "type": "string",
+      "enum": ["remote", "local", "hybrid", "unknown"]
+    },
+    "distance_miles": { "type": ["number", "null"] },
+    "industry": { "type": ["string", "null"] },
+    "description": { "type": ["string", "null"] },
+    "fit_score": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+    "fit_band": { "type": ["string", "null"] },
+    "reason": { "type": ["string", "null"] },
+    "duplicate_key": { "type": ["string", "null"] }
+  },
+  "required": [
+    "company",
+    "role_title",
+    "location",
+    "source",
+    "posting_url",
+    "remote_or_local"
+  ],
+  "additionalProperties": true
+}
