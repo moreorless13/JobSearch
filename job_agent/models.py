@@ -13,6 +13,10 @@ class SummaryCounts(BaseModel):
     duplicates_skipped: int = 0
     gmail_updates_processed: int = 0
     tracker_rows_updated: int = 0
+    qa_evaluations: int = 0
+    qa_approved: int = 0
+    qa_flagged: int = 0
+    qa_rejected: int = 0
 
 
 class JobRecord(BaseModel):
@@ -57,6 +61,20 @@ class ReviewItem(BaseModel):
     details: str | None = None
 
 
+class QAResult(BaseModel):
+    event_type: str
+    stage: str
+    entity_key: str | None = None
+    verdict: Literal["approve", "flag", "reject"]
+    score: float
+    approve_threshold: float
+    flag_threshold: float
+    blocked_action: str | None = None
+    recommended_action: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+    score_breakdown: dict[str, float] = Field(default_factory=dict)
+
+
 class FollowUpQuestion(BaseModel):
     question: str
     context: str | None = None
@@ -68,6 +86,7 @@ class WorkflowOutput(BaseModel):
     new_jobs: list[JobRecord] = Field(default_factory=list)
     gmail_updates: list[GmailUpdate] = Field(default_factory=list)
     tracker_updates: list[TrackerUpdate] = Field(default_factory=list)
+    qa_results: list[QAResult] = Field(default_factory=list)
     needs_review: list[ReviewItem] = Field(default_factory=list)
     follow_up_questions: list[FollowUpQuestion] = Field(default_factory=list)
     assistant_response: str | None = None

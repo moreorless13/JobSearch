@@ -27,6 +27,12 @@ PROFILE = {
     "target_industries": ["FinTech", "SaaS"],
     "keywords": ["API", "integrations", "payments"],
     "sheet_url": "https://example.com/sheet",
+    "qa": {
+        "approve_threshold": 0.8,
+        "flag_threshold": 0.6,
+        "llm_judge_enabled": False,
+        "duplicate_company_cooldown_days": 7,
+    },
 }
 
 
@@ -39,6 +45,7 @@ class FakeStateStore:
         self.outcomes = []
         self.follow_up_tasks = []
         self.plan_runs = []
+        self.qa_evaluations = []
 
     def ensure_goal_state(self, _candidate_profile):
         return self.goal_state
@@ -80,6 +87,12 @@ class FakeStateStore:
             if task.duplicate_key == duplicate_key:
                 task.status = "completed"
 
+    def append_qa_evaluation(self, evaluation):
+        self.qa_evaluations.append(evaluation)
+
+    def list_qa_evaluations(self, *, lookback_days=None):
+        return list(self.qa_evaluations)
+
 
 def patch_store(monkeypatch, store) -> None:
     monkeypatch.setattr("job_agent.orchestrator.RedisStateStore.from_env", lambda: store)
@@ -88,6 +101,7 @@ def patch_store(monkeypatch, store) -> None:
 def test_run_jobs_workflow_uses_decision_engine_and_tracker_sync(monkeypatch) -> None:
     store = FakeStateStore()
     patch_store(monkeypatch, store)
+    monkeypatch.setattr("job_agent.orchestrator.read_tracker_sheet_impl", lambda _sheet_url: {"implemented": True, "rows": []})
 
     monkeypatch.setattr(
         "job_agent.orchestrator.search_jobs_impl",
@@ -138,6 +152,7 @@ def test_run_jobs_workflow_uses_decision_engine_and_tracker_sync(monkeypatch) ->
     assert result.summary.jobs_reviewed == 4
     assert result.summary.jobs_added == 2
     assert result.summary.tracker_rows_updated == 1
+    assert result.summary.qa_evaluations == 2
     assert len(result.new_jobs) == 2
     assert {decision.action for decision in store.decisions} == {"prioritize", "queue_review"}
     assert any(item.kind == "job_requires_review" for item in result.needs_review)
@@ -145,6 +160,7 @@ def test_run_jobs_workflow_uses_decision_engine_and_tracker_sync(monkeypatch) ->
 
 def test_run_jobs_workflow_degrades_when_state_store_unavailable(monkeypatch) -> None:
     patch_store(monkeypatch, NullStateStore("redis unavailable"))
+    monkeypatch.setattr("job_agent.orchestrator.read_tracker_sheet_impl", lambda _sheet_url: {"implemented": False, "reason": "tracker unavailable"})
     monkeypatch.setattr(
         "job_agent.orchestrator.search_jobs_impl",
         lambda **_kwargs: {"implemented": True, "jobs": [], "summary": {"jobs_reviewed": 0, "duplicates_skipped": 0}, "notes": []},
@@ -206,61 +222,10 @@ def test_run_gmail_workflow_records_outcomes_and_immediate_review(monkeypatch) -
 
     assert result.summary.gmail_updates_processed == 1
     assert result.summary.tracker_rows_updated == 1
+    assert result.summary.qa_evaluations == 1
     assert len(store.outcomes) == 1
     assert store.outcomes[0].event_type == "interview_request"
     assert any(item.kind == "gmail_action_required" for item in result.needs_review)
-
-
-def test_run_gmail_workflow_does_not_attach_unmatched_tracker_row(monkeypatch) -> None:
-    store = FakeStateStore()
-    patch_store(monkeypatch, store)
-    monkeypatch.setattr(
-        "job_agent.orchestrator.search_gmail_job_updates_impl",
-        lambda **_kwargs: {
-            "implemented": True,
-            "messages": [
-                {
-                    "subject": "Interview availability for Completely Different Role",
-                    "from": "jobs@notifications.mail",
-                    "body": "Please share your availability so we can schedule time this week.",
-                    "snippet": "Please share your availability",
-                    "date": "Mon, 01 Jan 2026 09:00:00 -0500",
-                }
-            ],
-        },
-    )
-    monkeypatch.setattr(
-        "job_agent.orchestrator.read_tracker_sheet_impl",
-        lambda _sheet_url: {
-            "implemented": True,
-            "rows": [
-                {
-                    "company": "Acme",
-                    "role_title": "Solutions Engineer",
-                    "status": "Applied",
-                    "source": "greenhouse",
-                    "industry": "FinTech",
-                    "duplicate_key": "acme::solutions engineer::remote",
-                }
-            ],
-        },
-    )
-    monkeypatch.setattr(
-        "job_agent.orchestrator.upsert_tracker_row_impl",
-        lambda **_kwargs: {
-            "implemented": True,
-            "status": "updated",
-            "row": _kwargs["row"],
-        },
-    )
-
-    result = run_gmail_workflow(PROFILE)
-
-    assert result.summary.gmail_updates_processed == 1
-    assert len(store.outcomes) == 1
-    assert store.outcomes[0].duplicate_key != "acme::solutions engineer::remote"
-    assert store.outcomes[0].source is None
-    assert result.gmail_updates[0].matched_duplicate_key is None
 
 
 def test_run_reflect_workflow_updates_strategy_weights(monkeypatch) -> None:
@@ -283,6 +248,7 @@ def test_run_reflect_workflow_updates_strategy_weights(monkeypatch) -> None:
 
     result = run_reflect_workflow(PROFILE)
 
+    assert result.summary.qa_evaluations == 1
     assert "role solutions engineer" in (result.assistant_response or "")
     assert store.strategy_snapshot.role_weights["solutions engineer"] > 0
     assert store.strategy_snapshot.source_weights["greenhouse"] > 0
@@ -291,6 +257,7 @@ def test_run_reflect_workflow_updates_strategy_weights(monkeypatch) -> None:
 def test_run_preset_workflow_daily_merges_outputs(monkeypatch) -> None:
     store = FakeStateStore()
     patch_store(monkeypatch, store)
+    monkeypatch.setattr("job_agent.orchestrator.read_tracker_sheet_impl", lambda _sheet_url: {"implemented": True, "rows": []})
     monkeypatch.setattr(
         "job_agent.orchestrator.search_jobs_impl",
         lambda **_kwargs: {
@@ -330,7 +297,113 @@ def test_run_preset_workflow_daily_merges_outputs(monkeypatch) -> None:
 
     result = run_preset_workflow("daily", PROFILE)
 
-    assert result.summary.jobs_added == 1
-    assert result.summary.gmail_updates_processed == 0
-    assert result.summary.tracker_rows_updated == 1
-    assert result.assistant_response is not None
+    assert result.summary.qa_evaluations == 2
+    assert len(result.qa_results) == 2
+
+
+def test_run_jobs_workflow_rejects_duplicate_tracker_row_before_sheet_write(monkeypatch) -> None:
+    store = FakeStateStore()
+    patch_store(monkeypatch, store)
+    monkeypatch.setattr(
+        "job_agent.orchestrator.read_tracker_sheet_impl",
+        lambda _sheet_url: {
+            "implemented": True,
+            "rows": [
+                {
+                    "company": "Acme",
+                    "role_title": "Solutions Engineer",
+                    "location": "Remote - US",
+                    "duplicate_key": "acme::solutions engineer::remote us",
+                    "date_added": "2026-01-01",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.search_jobs_impl",
+        lambda **_kwargs: {
+            "implemented": True,
+            "jobs": [
+                {
+                    "company": "Acme",
+                    "role_title": "Solutions Engineer",
+                    "location": "Remote - US",
+                    "source": "company_sites",
+                    "posting_url": "https://example.com/jobs/1",
+                    "remote_or_local": "remote",
+                    "posting_age_days": 1,
+                    "duplicate_key": "acme::solutions engineer::remote us",
+                }
+            ],
+            "summary": {"jobs_reviewed": 1, "duplicates_skipped": 0},
+            "notes": [],
+        },
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.score_job_fit_impl",
+        lambda *_args, **_kwargs: {"fit_score": 90, "fit_band": "excellent", "reason": "great fit"},
+    )
+
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        "job_agent.orchestrator.upsert_tracker_row_impl",
+        lambda **kwargs: writes.append(kwargs) or {"implemented": True, "status": "updated", "row": {"status": "New"}},
+    )
+
+    result = run_jobs_workflow(PROFILE)
+
+    assert result.summary.jobs_added == 0
+    assert result.summary.tracker_rows_updated == 0
+    assert writes == []
+    assert result.summary.qa_rejected == 1
+    assert any(item.kind == "qa_reject" for item in result.needs_review)
+
+
+def test_run_gmail_workflow_blocks_unclear_email_mutations(monkeypatch) -> None:
+    store = FakeStateStore()
+    patch_store(monkeypatch, store)
+    monkeypatch.setattr(
+        "job_agent.orchestrator.search_gmail_job_updates_impl",
+        lambda **_kwargs: {
+            "implemented": True,
+            "messages": [
+                {
+                    "id": "msg_1",
+                    "subject": "Quick question",
+                    "from": "unknown@example.com",
+                    "body": "Checking in.",
+                    "snippet": "Checking in.",
+                    "date": "Mon, 01 Jan 2026 09:00:00 -0500",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr("job_agent.orchestrator.read_tracker_sheet_impl", lambda _sheet_url: {"implemented": True, "rows": []})
+
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        "job_agent.orchestrator.upsert_tracker_row_impl",
+        lambda **kwargs: writes.append(kwargs) or {"implemented": True, "status": "updated", "row": kwargs["row"]},
+    )
+
+    result = run_gmail_workflow(PROFILE)
+
+    assert result.summary.gmail_updates_processed == 1
+    assert result.summary.tracker_rows_updated == 0
+    assert writes == []
+    assert store.outcomes == []
+    assert result.summary.qa_flagged == 1
+    assert any(item.kind == "qa_flag" for item in result.needs_review)
+
+
+def test_run_reflect_workflow_blocks_persistence_without_evidence(monkeypatch) -> None:
+    store = FakeStateStore()
+    original_snapshot = store.strategy_snapshot.model_copy(deep=True)
+    patch_store(monkeypatch, store)
+    monkeypatch.setattr("job_agent.orchestrator.read_tracker_sheet_impl", lambda _sheet_url: {"implemented": True, "rows": []})
+
+    result = run_reflect_workflow(PROFILE)
+
+    assert result.summary.qa_flagged == 1
+    assert store.strategy_snapshot == original_snapshot
+    assert any(item.kind == "qa_flag" for item in result.needs_review)

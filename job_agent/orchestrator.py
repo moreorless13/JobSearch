@@ -6,7 +6,9 @@ from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 
-from job_agent.models import GmailUpdate, JobRecord, ReviewItem, TrackerUpdate, WorkflowOutput
+from job_agent.events import WorkflowEvent
+from job_agent.models import GmailUpdate, JobRecord, QAResult, ReviewItem, TrackerUpdate, WorkflowOutput
+from job_agent.qa import QAEventDispatcher
 from job_agent.state import (
     DecisionRecord,
     FollowUpTask,
@@ -136,7 +138,7 @@ def build_job_record(job: dict[str, Any], fit: dict[str, Any], decision_reason: 
         remote_or_local=job.get("remote_or_local", "unknown"),
         fit_score=fit.get("fit_score"),
         match_summary=fit.get("fit_band"),
-        duplicate_key=job.get("duplicate_key") or fit.get("duplicate_key") or build_duplicate_key(job.get("company"), job.get("role_title"), job.get("location")),
+        duplicate_key=job.get("duplicate_key"),
         reason=reason,
     )
 
@@ -278,11 +280,11 @@ def strategy_bonus(job: dict[str, Any], snapshot: StrategySnapshot, candidate_pr
     return int(round(bonus * 10))
 
 
-def freshness_bonus(job: dict[str, Any], base_fit_score: int, stale_days: int = STALE_POSTING_DAYS) -> tuple[int, bool]:
+def freshness_bonus(job: dict[str, Any], base_fit_score: int) -> tuple[int, bool]:
     age_days = infer_posting_age_days(job)
     if age_days is None:
         return 0, False
-    if age_days > stale_days and base_fit_score < 90:
+    if age_days > STALE_POSTING_DAYS and base_fit_score < 90:
         return 0, True
     if age_days <= 7:
         return 10, False
@@ -365,7 +367,7 @@ def decide_job_action(
     if salary_min is not None and int(salary_min) < int(candidate_profile["salary_floor"]):
         return "skip", base_fit_score, "Listed salary is below the configured floor.", 0, 0, 0, 0
 
-    freshness_points, stale_skip = freshness_bonus(job, base_fit_score, thresholds["stale_days"])
+    freshness_points, stale_skip = freshness_bonus(job, base_fit_score)
     if stale_skip:
         return "skip", base_fit_score, "Posting appears stale and fit is not strong enough to keep.", 0, 0, 0, 0
 
@@ -398,9 +400,12 @@ def due_follow_up_datetime(reference: datetime | None = None) -> datetime:
 
 def tracker_due_follow_ups(tracker_rows: list[dict[str, Any]]) -> list[FollowUpTask]:
     tasks: list[FollowUpTask] = []
+    positive_statuses = {"Interview Requested", "Assessment Requested", "Offer", "Rejected"}
     for row in tracker_rows:
         status = str(row.get("status") or "")
         if status != "Applied":
+            continue
+        if status in positive_statuses:
             continue
         applied_at = parse_date(row.get("applied_date"))
         if applied_at is None:
@@ -608,6 +613,7 @@ class JobSearchOrchestrator:
         self.state_store = RedisStateStore.from_env()
         self.goal_state = self.state_store.ensure_goal_state(candidate_profile)
         self.strategy_snapshot = self.state_store.get_strategy_snapshot(candidate_profile) or build_default_strategy_snapshot(candidate_profile)
+        self.qa_dispatcher = QAEventDispatcher(candidate_profile, self.state_store)
 
     def _append_degraded_mode_notice(self, output: WorkflowOutput) -> None:
         if not self.state_store.status.available and not any(item.kind == "state_store_unavailable" for item in output.needs_review):
@@ -627,6 +633,34 @@ class JobSearchOrchestrator:
         self.state_store.save_plan_run(build_plan_run(workflow, plan_tasks))
         self._append_degraded_mode_notice(output)
         return all_due_tasks
+
+    def _record_qa_result(self, output: WorkflowOutput, qa_result: QAResult) -> None:
+        output.qa_results.append(qa_result)
+        output.summary.qa_evaluations += 1
+        if qa_result.verdict == "approve":
+            output.summary.qa_approved += 1
+        elif qa_result.verdict == "flag":
+            output.summary.qa_flagged += 1
+        else:
+            output.summary.qa_rejected += 1
+
+    def _append_qa_review(
+        self,
+        output: WorkflowOutput,
+        *,
+        qa_result: QAResult,
+        company: str | None,
+        role_title: str | None,
+    ) -> None:
+        verdict_label = "flagged" if qa_result.verdict == "flag" else "rejected"
+        append_review(
+            output,
+            kind=f"qa_{qa_result.verdict}",
+            reason=f"QA {verdict_label} {qa_result.event_type} during {qa_result.stage}.",
+            details=" | ".join(qa_result.reasons) if qa_result.reasons else None,
+            company=company,
+            role_title=role_title,
+        )
 
     def _sync_job_to_tracker(self, output: WorkflowOutput, job: JobRecord, *, action: str) -> None:
         if action not in {"prioritize", "track"}:
@@ -668,7 +702,9 @@ class JobSearchOrchestrator:
 
     def run_jobs(self) -> WorkflowOutput:
         output = WorkflowOutput()
-        self._save_plan("jobs", output)
+        sheet_result = read_tracker_sheet_impl(self.candidate_profile["sheet_url"])
+        tracker_rows = sheet_result.get("rows", []) if sheet_result.get("implemented", False) else []
+        self._save_plan("jobs", output, tracker_rows=tracker_rows)
 
         keywords = build_search_keywords(self.candidate_profile)
         search_result = search_jobs_impl(
@@ -720,9 +756,26 @@ class JobSearchOrchestrator:
             if action == "skip":
                 continue
 
-            kept_count += 1
             decision_reason = f"Decision: {action} (score {final_score}). {rationale}"
             record = build_job_record(job, fit, decision_reason=decision_reason)
+            qa_result = self.qa_dispatcher.evaluate(
+                workflow="jobs",
+                event_type=WorkflowEvent.JOB_FOUND,
+                stage="pre_action",
+                entity_key=record.duplicate_key,
+                payload={
+                    "job": job,
+                    "fit": fit,
+                    "decision": decision.model_dump(),
+                },
+                context={"tracker_rows": tracker_rows},
+            )
+            self._record_qa_result(output, qa_result)
+            if qa_result.verdict == "reject":
+                self._append_qa_review(output, qa_result=qa_result, company=record.company, role_title=record.role_title)
+                continue
+
+            kept_count += 1
             output.new_jobs.append(record)
             if action == "queue_review":
                 append_review(
@@ -733,6 +786,9 @@ class JobSearchOrchestrator:
                     company=record.company,
                     role_title=record.role_title,
                 )
+            if qa_result.verdict == "flag":
+                self._append_qa_review(output, qa_result=qa_result, company=record.company, role_title=record.role_title)
+                continue
             self._sync_job_to_tracker(output, record, action=action)
 
         output.new_jobs.sort(key=lambda job: job.fit_score or 0, reverse=True)
@@ -774,12 +830,11 @@ class JobSearchOrchestrator:
                 email_body=message.get("body", ""),
             )
             matched = match_email_to_tracker_row_payload(classified_email=classified, tracker_rows=tracker_rows)
-            matched_row = matched.get("row") if matched.get("matched") else None
-            matched_context = matched_row or {}
-            duplicate_key = matched_context.get("duplicate_key") or build_duplicate_key(
+            matched_row = matched.get("row") or {}
+            duplicate_key = matched_row.get("duplicate_key") or build_duplicate_key(
                 classified.get("company"),
                 classified.get("role_title"),
-                matched_context.get("location"),
+                matched_row.get("location"),
             )
             output.gmail_updates.append(
                 GmailUpdate(
@@ -788,21 +843,45 @@ class JobSearchOrchestrator:
                     role_title=classified.get("role_title"),
                     deadline=classified.get("deadline"),
                     action=classified.get("action"),
-                    matched_duplicate_key=matched_context.get("duplicate_key"),
+                    matched_duplicate_key=matched_row.get("duplicate_key"),
                     confidence=matched.get("confidence"),
                 )
             )
+
+            qa_result = self.qa_dispatcher.evaluate(
+                workflow="gmail",
+                event_type=WorkflowEvent.EMAIL_RECEIVED,
+                stage="pre_action",
+                entity_key=duplicate_key or message.get("id"),
+                payload={
+                    "message": message,
+                    "classified": classified,
+                    "matched": matched,
+                    "matched_row": matched_row,
+                },
+                context={"tracker_rows": tracker_rows},
+            )
+            self._record_qa_result(output, qa_result)
+            if qa_result.verdict in {"flag", "reject"}:
+                self._append_qa_review(
+                    output,
+                    qa_result=qa_result,
+                    company=classified.get("company") or matched_row.get("company"),
+                    role_title=classified.get("role_title") or matched_row.get("role_title"),
+                )
+                processed_count += 1
+                continue
 
             self.state_store.append_outcome(
                 OutcomeEvent(
                     event_id=str(uuid.uuid4()),
                     timestamp=isoformat(parse_date(message.get("date")) or utc_now()),
                     duplicate_key=duplicate_key,
-                    company=classified.get("company") or matched_context.get("company"),
-                    role_title=classified.get("role_title") or matched_context.get("role_title"),
-                    role_slug=role_slug(classified.get("role_title") or matched_context.get("role_title")),
-                    source=matched_context.get("source"),
-                    industry=matched_context.get("industry"),
+                    company=classified.get("company") or matched_row.get("company"),
+                    role_title=classified.get("role_title") or matched_row.get("role_title"),
+                    role_slug=role_slug(classified.get("role_title") or matched_row.get("role_title")),
+                    source=matched_row.get("source"),
+                    industry=matched_row.get("industry"),
                     event_type=classification_to_event_type(classified["classification"]),
                     metadata={"subject": message.get("subject"), "from": message.get("from")},
                 )
@@ -814,8 +893,8 @@ class JobSearchOrchestrator:
             if classified["classification"] in IMMEDIATE_REVIEW_CLASSIFICATIONS:
                 task = build_follow_up_task(
                     duplicate_key=duplicate_key,
-                    company=classified.get("company") or matched_context.get("company"),
-                    role_title=classified.get("role_title") or matched_context.get("role_title"),
+                    company=classified.get("company") or matched_row.get("company"),
+                    role_title=classified.get("role_title") or matched_row.get("role_title"),
                     due_at=utc_now(),
                     reason=f"{classified['classification']} requires immediate review.",
                 )
@@ -832,7 +911,7 @@ class JobSearchOrchestrator:
             if sheet_result.get("implemented", False):
                 tracker_row = build_tracker_row_from_email_update(
                     classified_email=classified,
-                    matched_row=matched_row,
+                    matched_row=matched_row if matched.get("matched") else None,
                     message=message,
                 )
                 upsert_result = upsert_tracker_row_impl(
@@ -894,12 +973,31 @@ class JobSearchOrchestrator:
             outcomes=outcomes,
             due_follow_ups=due_tasks,
         )
-        self.strategy_snapshot = updated_snapshot
-        self.goal_state = updated_goal_state
-        self.state_store.save_strategy_snapshot(updated_snapshot)
-        if updated_goal_state is not None:
-            self.state_store.save_goal_state(updated_goal_state)
-        output.assistant_response = updated_snapshot.reflection_summary
+        qa_result = self.qa_dispatcher.evaluate(
+            workflow="reflect",
+            event_type=WorkflowEvent.STRATEGY_REFLECTED,
+            stage="pre_action",
+            entity_key=self.goal_state.goal_id if self.goal_state is not None else "default_goal",
+            payload={
+                "previous_snapshot": self.strategy_snapshot,
+                "updated_snapshot": updated_snapshot,
+                "decisions": decisions,
+                "outcomes": outcomes,
+                "due_follow_ups": due_tasks,
+            },
+        )
+        self._record_qa_result(output, qa_result)
+        if qa_result.verdict == "approve":
+            self.strategy_snapshot = updated_snapshot
+            self.goal_state = updated_goal_state
+            self.state_store.save_strategy_snapshot(updated_snapshot)
+            if updated_goal_state is not None:
+                self.state_store.save_goal_state(updated_goal_state)
+            output.assistant_response = updated_snapshot.reflection_summary
+            return output
+
+        self._append_qa_review(output, qa_result=qa_result, company=None, role_title=None)
+        output.assistant_response = f"QA blocked reflection persistence. {updated_snapshot.reflection_summary}"
         return output
 
     def run_daily(self) -> WorkflowOutput:
@@ -911,6 +1009,7 @@ class JobSearchOrchestrator:
             new_jobs=[*jobs_output.new_jobs],
             gmail_updates=[*gmail_output.gmail_updates],
             tracker_updates=[*jobs_output.tracker_updates, *gmail_output.tracker_updates],
+            qa_results=[*jobs_output.qa_results, *gmail_output.qa_results, *reflect_output.qa_results],
             needs_review=[*jobs_output.needs_review, *gmail_output.needs_review, *reflect_output.needs_review],
             follow_up_questions=[],
             assistant_response=reflect_output.assistant_response or gmail_output.assistant_response or jobs_output.assistant_response,
@@ -920,4 +1019,8 @@ class JobSearchOrchestrator:
         merged.summary.jobs_reviewed = jobs_output.summary.jobs_reviewed
         merged.summary.jobs_added = jobs_output.summary.jobs_added
         merged.summary.duplicates_skipped = jobs_output.summary.duplicates_skipped
+        merged.summary.qa_evaluations += gmail_output.summary.qa_evaluations + reflect_output.summary.qa_evaluations
+        merged.summary.qa_approved += gmail_output.summary.qa_approved + reflect_output.summary.qa_approved
+        merged.summary.qa_flagged += gmail_output.summary.qa_flagged + reflect_output.summary.qa_flagged
+        merged.summary.qa_rejected += gmail_output.summary.qa_rejected + reflect_output.summary.qa_rejected
         return merged

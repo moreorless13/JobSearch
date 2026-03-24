@@ -24,6 +24,7 @@ DECISIONS_KEY = f"{STATE_NAMESPACE}:decisions"
 OUTCOMES_KEY = f"{STATE_NAMESPACE}:outcomes"
 PLAN_RUNS_KEY = f"{STATE_NAMESPACE}:plan_runs"
 FOLLOW_UPS_KEY = f"{STATE_NAMESPACE}:follow_ups"
+QA_EVALUATIONS_KEY = f"{STATE_NAMESPACE}:qa_evaluations"
 MAX_HISTORY_ITEMS = 500
 WEIGHT_DELTA_CAP = 0.4
 ModelT = TypeVar("ModelT", bound=BaseModel)
@@ -133,6 +134,24 @@ class StateStoreStatus(BaseModel):
     degraded_reason: str | None = None
 
 
+class QAEvaluationRecord(BaseModel):
+    evaluation_id: str
+    timestamp: str
+    workflow: str
+    event_type: str
+    stage: str
+    entity_key: str | None = None
+    verdict: Literal["approve", "flag", "reject"]
+    score: float
+    approve_threshold: float
+    flag_threshold: float
+    blocked_action: str | None = None
+    recommended_action: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+    score_breakdown: dict[str, float] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class StateStore:
     def __init__(self, *, available: bool, degraded_reason: str | None = None) -> None:
         self.status = StateStoreStatus(available=available, degraded_reason=degraded_reason)
@@ -171,6 +190,12 @@ class StateStore:
         raise NotImplementedError
 
     def mark_follow_up_completed(self, duplicate_key: str | None) -> None:
+        raise NotImplementedError
+
+    def append_qa_evaluation(self, evaluation: QAEvaluationRecord) -> None:
+        raise NotImplementedError
+
+    def list_qa_evaluations(self, *, lookback_days: int | None = None) -> list[QAEvaluationRecord]:
         raise NotImplementedError
 
 
@@ -213,6 +238,12 @@ class NullStateStore(StateStore):
 
     def mark_follow_up_completed(self, duplicate_key: str | None) -> None:
         return None
+
+    def append_qa_evaluation(self, evaluation: QAEvaluationRecord) -> None:
+        return None
+
+    def list_qa_evaluations(self, *, lookback_days: int | None = None) -> list[QAEvaluationRecord]:
+        return []
 
 
 def build_default_subgoals(candidate_profile: dict[str, Any]) -> list[Subgoal]:
@@ -383,6 +414,12 @@ class RedisStateStore(StateStore):
             pipeline.rpush(FOLLOW_UPS_KEY, task.model_dump_json())
         pipeline.ltrim(FOLLOW_UPS_KEY, 0, MAX_HISTORY_ITEMS - 1)
         pipeline.execute()
+
+    def append_qa_evaluation(self, evaluation: QAEvaluationRecord) -> None:
+        self._push_model(QA_EVALUATIONS_KEY, evaluation)
+
+    def list_qa_evaluations(self, *, lookback_days: int | None = None) -> list[QAEvaluationRecord]:
+        return self._load_list(QA_EVALUATIONS_KEY, QAEvaluationRecord, lookback_days=lookback_days)
 
 
 def clamp_weight(value: float) -> float:

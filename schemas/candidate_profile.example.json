@@ -17,6 +17,12 @@
     "queue_review": 60,
     "stale_days": 21
   },
+  "qa": {
+    "approve_threshold": 0.8,
+    "flag_threshold": 0.6,
+    "llm_judge_enabled": false,
+    "duplicate_company_cooldown_days": 7
+  },
   "target_roles": [
     "Solutions Engineer",
     "Solutions Architect",

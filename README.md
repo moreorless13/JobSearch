@@ -118,14 +118,6 @@ All runs print a JSON payload with this top-level shape:
 .venv/bin/python -m pytest -q
 ```
 
-## Type Check
-
-```bash
-npx pyright job_agent/tools/gmail.py job_agent/tools/jobs.py job_agent/orchestrator.py job_agent/state.py
-```
-
-`pyrightconfig.json` points Pyright at `.venv`, so editor and CLI diagnostics use the project virtualenv.
-
 ## Known behavior
 
 - A run that writes nothing to Sheets usually means job search returned zero qualifying jobs after local filtering, not that Sheets is broken.

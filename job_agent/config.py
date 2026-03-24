@@ -23,6 +23,12 @@ DEFAULT_DECISION_THRESHOLDS = {
     "queue_review": 60,
     "stale_days": 21,
 }
+DEFAULT_QA_SETTINGS = {
+    "approve_threshold": 0.8,
+    "flag_threshold": 0.6,
+    "llm_judge_enabled": False,
+    "duplicate_company_cooldown_days": 7,
+}
 
 
 def load_candidate_profile() -> dict[str, Any]:
@@ -38,6 +44,10 @@ def load_candidate_profile() -> dict[str, Any]:
     profile["decision_thresholds"] = {
         **DEFAULT_DECISION_THRESHOLDS,
         **(profile.get("decision_thresholds") or {}),
+    }
+    profile["qa"] = {
+        **DEFAULT_QA_SETTINGS,
+        **(profile.get("qa") or {}),
     }
 
     return profile

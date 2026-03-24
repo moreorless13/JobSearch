@@ -20,6 +20,7 @@ Final output requirements:
 - Return valid JSON that matches the output contract.
 - Return only the JSON object. Do not add prose before or after it.
 - Always include `summary`, `new_jobs`, `gmail_updates`, `tracker_updates`, `needs_review`, `follow_up_questions`, and `assistant_response`.
+- Include `qa_results` when QA evaluations are present. Use an empty list when there were no QA evaluations.
 - If the tools are stubbed or return no data, return empty lists and zeroed counters rather than inventing activity.
 - Use `follow_up_questions` for true blocking clarifications. Keep it empty when the workflow can proceed safely.
 - Keep follow-up questions short and specific. Ask at most 3.
@@ -36,11 +37,16 @@ Output contract:
     "jobs_added": 0,
     "duplicates_skipped": 0,
     "gmail_updates_processed": 0,
-    "tracker_rows_updated": 0
+    "tracker_rows_updated": 0,
+    "qa_evaluations": 0,
+    "qa_approved": 0,
+    "qa_flagged": 0,
+    "qa_rejected": 0
   }},
   "new_jobs": [],
   "gmail_updates": [],
   "tracker_updates": [],
+  "qa_results": [],
   "needs_review": [],
   "assistant_response": "I updated 1 tracker row and need one clarification before continuing the broader search.",
   "follow_up_questions": [
