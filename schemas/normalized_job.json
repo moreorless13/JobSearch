@@ -34,6 +34,8 @@
     "distance_miles": { "type": ["number", "null"] },
     "industry": { "type": ["string", "null"] },
     "description": { "type": ["string", "null"] },
+    "posted_at": { "type": ["string", "null"], "format": "date-time" },
+    "posting_age_days": { "type": ["integer", "null"], "minimum": 0 },
     "fit_score": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
     "fit_band": { "type": ["string", "null"] },
     "reason": { "type": ["string", "null"] },

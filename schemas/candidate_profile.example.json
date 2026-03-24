@@ -6,7 +6,17 @@
     "radius_miles": 25,
     "origin": "City, State"
   },
-  "salary_floor": 20,
+  "salary_floor": 65000,
+  "top_level_objective": "maximize qualified interview probability within 30 days while respecting salary, location, and role constraints",
+  "company_priorities": {
+    "example company": 0.2
+  },
+  "decision_thresholds": {
+    "prioritize": 85,
+    "track": 70,
+    "queue_review": 60,
+    "stale_days": 21
+  },
   "target_roles": [
     "Solutions Engineer",
     "Solutions Architect",

@@ -61,6 +61,8 @@ class WebSearchJob(BaseModel):
     distance_miles: float | None = None
     industry: str | None = None
     description: str | None = None
+    posted_at: str | None = None
+    posting_age_days: int | None = None
     reason: str | None = None
 
 
@@ -290,6 +292,8 @@ def build_job_search_prompt(
         "Return only real job postings, not blog posts or generic category pages.\n"
         "Prefer official company application URLs when available.\n"
         "For each job, provide a concise description, the best available posting URL, and a careers URL when discoverable.\n"
+        "Include posted_at when the posting date is discoverable, otherwise leave it null. "
+        "Also estimate posting_age_days when the source makes recency clear.\n"
         "Estimate distance_miles when the office location is not remote and the city/state is clear. Leave it null if unclear.\n"
         "Use source names from this set when possible: "
         "linkedin, indeed, ziprecruiter, greenhouse, lever, workday, ashby, smartrecruiters, google_jobs, company_sites.\n"

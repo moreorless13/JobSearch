@@ -13,6 +13,15 @@ DEFAULT_WORKFLOW_INPUTS = {
     "daily": "Run today's workflow: search jobs, update the tracker, scan Gmail, and summarize changes.",
     "jobs": "Search for new matching jobs, update the tracker, and summarize changes.",
     "gmail": "Scan Gmail for job-related updates, sync the tracker, and summarize changes.",
+    "reflect": "Review recent outcomes, update strategy weights, and summarize the changes.",
+}
+
+DEFAULT_TOP_LEVEL_OBJECTIVE = "maximize qualified interview probability within 30 days while respecting salary, location, and role constraints"
+DEFAULT_DECISION_THRESHOLDS = {
+    "prioritize": 85,
+    "track": 70,
+    "queue_review": 60,
+    "stale_days": 21,
 }
 
 
@@ -23,6 +32,13 @@ def load_candidate_profile() -> dict[str, Any]:
     override_sheet_url = os.getenv("JOB_TRACKER_SHEET_URL")
     if override_sheet_url:
         profile["sheet_url"] = override_sheet_url
+
+    profile.setdefault("top_level_objective", DEFAULT_TOP_LEVEL_OBJECTIVE)
+    profile.setdefault("company_priorities", {})
+    profile["decision_thresholds"] = {
+        **DEFAULT_DECISION_THRESHOLDS,
+        **(profile.get("decision_thresholds") or {}),
+    }
 
     return profile
 
@@ -40,3 +56,7 @@ def build_run_input(workflow: str) -> str:
 
 def get_model_name() -> str:
     return os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+
+
+def get_redis_url() -> str | None:
+    return os.getenv("REDIS_URL")

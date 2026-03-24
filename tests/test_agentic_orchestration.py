@@ -1,0 +1,207 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from job_agent.orchestrator import decide_job_action, due_follow_up_datetime, reflect_strategy, tracker_due_follow_ups
+from job_agent.state import (
+    ACTIVE_GOAL_KEY,
+    CURRENT_STRATEGY_KEY,
+    DecisionRecord,
+    GoalState,
+    OutcomeEvent,
+    RedisStateStore,
+    StrategySnapshot,
+    build_default_goal_state,
+    build_default_strategy_snapshot,
+    isoformat,
+)
+
+
+PROFILE = {
+    "candidate_name": "James",
+    "location_rules": {
+        "allow_remote": True,
+        "radius_miles": 25,
+        "origin": "Cedar Knolls, NJ",
+    },
+    "salary_floor": 65000,
+    "top_level_objective": "maximize qualified interview probability within 30 days while respecting salary, location, and role constraints",
+    "company_priorities": {},
+    "decision_thresholds": {
+        "prioritize": 85,
+        "track": 70,
+        "queue_review": 60,
+        "stale_days": 21,
+    },
+    "target_roles": ["Solutions Engineer", "Integration Engineer"],
+    "target_industries": ["FinTech", "SaaS"],
+    "keywords": ["API", "integrations", "payments"],
+    "sheet_url": "https://example.com/sheet",
+}
+
+
+class FakePipeline:
+    def __init__(self, client):
+        self.client = client
+        self.commands = []
+
+    def delete(self, key):
+        self.commands.append(("delete", key))
+        return self
+
+    def rpush(self, key, value):
+        self.commands.append(("rpush", key, value))
+        return self
+
+    def ltrim(self, key, start, stop):
+        self.commands.append(("ltrim", key, start, stop))
+        return self
+
+    def execute(self):
+        for command in self.commands:
+            if command[0] == "delete":
+                self.client.delete(command[1])
+            elif command[0] == "rpush":
+                self.client.rpush(command[1], command[2])
+            elif command[0] == "ltrim":
+                self.client.ltrim(command[1], command[2], command[3])
+
+
+class FakeRedisClient:
+    def __init__(self) -> None:
+        self.values = {}
+        self.lists = {}
+
+    def ping(self):
+        return True
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def set(self, key, value):
+        self.values[key] = value
+
+    def lpush(self, key, value):
+        self.lists.setdefault(key, []).insert(0, value)
+
+    def ltrim(self, key, start, stop):
+        self.lists[key] = self.lists.get(key, [])[start : stop + 1]
+
+    def lrange(self, key, start, stop):
+        items = self.lists.get(key, [])
+        if stop == -1:
+            return items[start:]
+        return items[start : stop + 1]
+
+    def delete(self, key):
+        self.lists[key] = []
+
+    def rpush(self, key, value):
+        self.lists.setdefault(key, []).append(value)
+
+    def pipeline(self):
+        return FakePipeline(self)
+
+
+def test_redis_state_store_seeds_goal_and_strategy() -> None:
+    client = FakeRedisClient()
+    store = RedisStateStore(client)
+
+    goal_state = store.ensure_goal_state(PROFILE)
+    strategy = store.get_strategy_snapshot(PROFILE)
+
+    assert goal_state is not None
+    assert strategy is not None
+    assert ACTIVE_GOAL_KEY in client.values
+    assert CURRENT_STRATEGY_KEY in client.values
+    assert goal_state.objective == PROFILE["top_level_objective"]
+
+
+def test_decide_job_action_applies_thresholds_and_stale_skip() -> None:
+    snapshot = build_default_strategy_snapshot(PROFILE)
+    fit = {"fit_score": 82}
+    fresh_job = {
+        "company": "Acme",
+        "role_title": "Solutions Engineer",
+        "source": "company_sites",
+        "posting_url": "https://example.com/jobs/1",
+        "posting_age_days": 2,
+    }
+    stale_job = {
+        "company": "StaleCo",
+        "role_title": "Solutions Engineer",
+        "source": "linkedin",
+        "posting_url": "https://example.com/jobs/2",
+        "posting_age_days": 30,
+    }
+
+    fresh_action = decide_job_action(fresh_job, fit, PROFILE, snapshot)
+    stale_action = decide_job_action(stale_job, fit, PROFILE, snapshot)
+
+    assert fresh_action[0] == "prioritize"
+    assert stale_action[0] == "skip"
+
+
+def test_tracker_due_follow_ups_waits_three_business_days() -> None:
+    rows = [
+        {
+            "company": "Acme",
+            "role_title": "Solutions Engineer",
+            "status": "Applied",
+            "applied_date": "2026-01-05",
+            "duplicate_key": "acme::solutions engineer::remote",
+        }
+    ]
+
+    tasks = tracker_due_follow_ups(rows)
+
+    assert len(tasks) == 1
+    assert tasks[0].duplicate_key == "acme::solutions engineer::remote"
+
+
+def test_reflect_strategy_reweights_recent_positive_signals() -> None:
+    snapshot = build_default_strategy_snapshot(PROFILE)
+    goal_state = build_default_goal_state(PROFILE)
+    decisions = [
+        DecisionRecord(
+            decision_id="1",
+            timestamp=isoformat(datetime(2026, 1, 10, tzinfo=UTC)),
+            workflow="jobs",
+            company="Acme",
+            role_title="Solutions Engineer",
+            role_slug="solutions engineer",
+            industry="FinTech",
+            source="greenhouse",
+            action="prioritize",
+            final_score=90,
+            base_fit_score=82,
+            rationale="test",
+        )
+    ]
+    outcomes = [
+        OutcomeEvent(
+            event_id="1",
+            timestamp=isoformat(datetime(2026, 1, 11, tzinfo=UTC)),
+            company="Acme",
+            role_title="Solutions Engineer",
+            role_slug="solutions engineer",
+            industry="FinTech",
+            source="greenhouse",
+            event_type="interview_request",
+        )
+    ]
+
+    updated_snapshot, updated_goal_state = reflect_strategy(
+        candidate_profile=PROFILE,
+        snapshot=snapshot,
+        goal_state=goal_state,
+        decisions=decisions,
+        outcomes=outcomes,
+        due_follow_ups=[],
+    )
+
+    assert updated_snapshot.role_weights["solutions engineer"] > 0
+    assert updated_snapshot.industry_weights["fintech"] > 0
+    assert updated_snapshot.source_weights["greenhouse"] > 0
+    assert updated_goal_state is not None
+    assert any(subgoal.priority > 1.0 for subgoal in updated_goal_state.subgoals if subgoal.subgoal_id == "role:solutions engineer")
