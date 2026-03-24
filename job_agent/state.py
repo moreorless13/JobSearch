@@ -4,7 +4,7 @@ import json
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar, cast
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +26,7 @@ PLAN_RUNS_KEY = f"{STATE_NAMESPACE}:plan_runs"
 FOLLOW_UPS_KEY = f"{STATE_NAMESPACE}:follow_ups"
 MAX_HISTORY_ITEMS = 500
 WEIGHT_DELTA_CAP = 0.4
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 def utc_now() -> datetime:
@@ -292,11 +293,11 @@ class RedisStateStore(StateStore):
         except Exception as exc:  # pragma: no cover - covered by degraded-mode tests through monkeypatch
             return NullStateStore(f"Redis is unavailable: {exc}")
 
-    def _get_model(self, key: str, model_cls: type[BaseModel]) -> BaseModel | None:
+    def _get_model(self, key: str, model_cls: type[ModelT]) -> ModelT | None:
         payload = self.client.get(key)
         if not payload:
             return None
-        return model_cls.model_validate_json(payload)
+        return cast(ModelT, model_cls.model_validate_json(payload))
 
     def _set_model(self, key: str, model: BaseModel) -> None:
         self.client.set(key, model.model_dump_json())
@@ -305,10 +306,10 @@ class RedisStateStore(StateStore):
         self.client.lpush(key, model.model_dump_json())
         self.client.ltrim(key, 0, MAX_HISTORY_ITEMS - 1)
 
-    def _load_list(self, key: str, model_cls: type[BaseModel], *, lookback_days: int | None = None) -> list[BaseModel]:
-        items = []
+    def _load_list(self, key: str, model_cls: type[ModelT], *, lookback_days: int | None = None) -> list[ModelT]:
+        items: list[ModelT] = []
         for payload in self.client.lrange(key, 0, MAX_HISTORY_ITEMS - 1):
-            item = model_cls.model_validate_json(payload)
+            item = cast(ModelT, model_cls.model_validate_json(payload))
             timestamp = getattr(item, "timestamp", None)
             if timestamp and not within_lookback(timestamp, lookback_days):
                 continue
@@ -347,13 +348,13 @@ class RedisStateStore(StateStore):
         self._push_model(OUTCOMES_KEY, event)
 
     def list_decisions(self, *, lookback_days: int | None = None) -> list[DecisionRecord]:
-        return [item for item in self._load_list(DECISIONS_KEY, DecisionRecord, lookback_days=lookback_days)]
+        return self._load_list(DECISIONS_KEY, DecisionRecord, lookback_days=lookback_days)
 
     def list_outcomes(self, *, lookback_days: int | None = None) -> list[OutcomeEvent]:
-        return [item for item in self._load_list(OUTCOMES_KEY, OutcomeEvent, lookback_days=lookback_days)]
+        return self._load_list(OUTCOMES_KEY, OutcomeEvent, lookback_days=lookback_days)
 
     def list_follow_up_tasks(self) -> list[FollowUpTask]:
-        items = [item for item in self._load_list(FOLLOW_UPS_KEY, FollowUpTask)]
+        items = self._load_list(FOLLOW_UPS_KEY, FollowUpTask)
         return [item for item in items if item.status == "planned"]
 
     def save_follow_up_task(self, task: FollowUpTask) -> None:

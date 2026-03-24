@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from job_agent.orchestrator import decide_job_action, due_follow_up_datetime, reflect_strategy, tracker_due_follow_ups
+from job_agent.orchestrator import build_job_record, decide_job_action, due_follow_up_datetime, reflect_strategy, tracker_due_follow_ups
 from job_agent.state import (
     ACTIVE_GOAL_KEY,
     CURRENT_STRATEGY_KEY,
@@ -140,6 +140,47 @@ def test_decide_job_action_applies_thresholds_and_stale_skip() -> None:
 
     assert fresh_action[0] == "prioritize"
     assert stale_action[0] == "skip"
+
+
+def test_decide_job_action_respects_configured_stale_days() -> None:
+    snapshot = build_default_strategy_snapshot(PROFILE)
+    profile = {
+        **PROFILE,
+        "decision_thresholds": {
+            **PROFILE["decision_thresholds"],
+            "stale_days": 5,
+        },
+    }
+    fit = {"fit_score": 82}
+    stale_job = {
+        "company": "StaleCo",
+        "role_title": "Solutions Engineer",
+        "source": "linkedin",
+        "posting_url": "https://example.com/jobs/2",
+        "posting_age_days": 6,
+    }
+
+    stale_action = decide_job_action(stale_job, fit, profile, snapshot)
+
+    assert stale_action[0] == "skip"
+
+
+def test_build_job_record_uses_fallback_duplicate_key() -> None:
+    record = build_job_record(
+        {
+            "company": "Acme",
+            "role_title": "Solutions Engineer",
+            "location": "Remote",
+        },
+        {
+            "fit_score": 82,
+            "fit_band": "strong",
+            "reason": "strong fit",
+            "duplicate_key": "acme::solutions engineer::remote",
+        },
+    )
+
+    assert record.duplicate_key == "acme::solutions engineer::remote"
 
 
 def test_tracker_due_follow_ups_waits_three_business_days() -> None:

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from agents import function_tool
 from openai import OpenAI
+from openai.types.responses import WebSearchToolParam
 from pydantic import BaseModel, Field
 
 from job_agent.config import get_model_name
@@ -436,12 +437,15 @@ def perform_web_search_job_lookup(
     sources: list[str],
 ) -> WebSearchJobsResult:
     client = OpenAI()
-    tools: list[dict[str, Any]] = [
-        {
-            "type": "web_search_preview",
-            "search_context_size": "high",
-            "user_location": approximate_user_location(origin),
-        }
+    tools: list[WebSearchToolParam] = [
+        cast(
+            WebSearchToolParam,
+            {
+                "type": "web_search_preview",
+                "search_context_size": "high",
+                "user_location": approximate_user_location(origin),
+            },
+        )
     ]
 
     response = client.responses.parse(

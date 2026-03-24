@@ -211,6 +211,58 @@ def test_run_gmail_workflow_records_outcomes_and_immediate_review(monkeypatch) -
     assert any(item.kind == "gmail_action_required" for item in result.needs_review)
 
 
+def test_run_gmail_workflow_does_not_attach_unmatched_tracker_row(monkeypatch) -> None:
+    store = FakeStateStore()
+    patch_store(monkeypatch, store)
+    monkeypatch.setattr(
+        "job_agent.orchestrator.search_gmail_job_updates_impl",
+        lambda **_kwargs: {
+            "implemented": True,
+            "messages": [
+                {
+                    "subject": "Interview availability for Completely Different Role",
+                    "from": "jobs@notifications.mail",
+                    "body": "Please share your availability so we can schedule time this week.",
+                    "snippet": "Please share your availability",
+                    "date": "Mon, 01 Jan 2026 09:00:00 -0500",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.read_tracker_sheet_impl",
+        lambda _sheet_url: {
+            "implemented": True,
+            "rows": [
+                {
+                    "company": "Acme",
+                    "role_title": "Solutions Engineer",
+                    "status": "Applied",
+                    "source": "greenhouse",
+                    "industry": "FinTech",
+                    "duplicate_key": "acme::solutions engineer::remote",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.upsert_tracker_row_impl",
+        lambda **_kwargs: {
+            "implemented": True,
+            "status": "updated",
+            "row": _kwargs["row"],
+        },
+    )
+
+    result = run_gmail_workflow(PROFILE)
+
+    assert result.summary.gmail_updates_processed == 1
+    assert len(store.outcomes) == 1
+    assert store.outcomes[0].duplicate_key != "acme::solutions engineer::remote"
+    assert store.outcomes[0].source is None
+    assert result.gmail_updates[0].matched_duplicate_key is None
+
+
 def test_run_reflect_workflow_updates_strategy_weights(monkeypatch) -> None:
     store = FakeStateStore()
     store.decisions.extend(

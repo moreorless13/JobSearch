@@ -4,7 +4,7 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Literal
 
 from job_agent.models import GmailUpdate, JobRecord, ReviewItem, TrackerUpdate, WorkflowOutput
 from job_agent.state import (
@@ -51,6 +51,7 @@ IMMEDIATE_REVIEW_CLASSIFICATIONS = {"Interview Request", "Assessment Request", "
 STALE_POSTING_DAYS = 21
 REFLECTION_LOOKBACK_DAYS = 14
 FOLLOW_UP_DAYS = 3
+DecisionAction = Literal["prioritize", "track", "queue_review", "follow_up_due", "skip"]
 
 
 def dedupe_list(values: list[str]) -> list[str]:
@@ -135,7 +136,7 @@ def build_job_record(job: dict[str, Any], fit: dict[str, Any], decision_reason: 
         remote_or_local=job.get("remote_or_local", "unknown"),
         fit_score=fit.get("fit_score"),
         match_summary=fit.get("fit_band"),
-        duplicate_key=job.get("duplicate_key"),
+        duplicate_key=job.get("duplicate_key") or fit.get("duplicate_key") or build_duplicate_key(job.get("company"), job.get("role_title"), job.get("location")),
         reason=reason,
     )
 
@@ -277,11 +278,11 @@ def strategy_bonus(job: dict[str, Any], snapshot: StrategySnapshot, candidate_pr
     return int(round(bonus * 10))
 
 
-def freshness_bonus(job: dict[str, Any], base_fit_score: int) -> tuple[int, bool]:
+def freshness_bonus(job: dict[str, Any], base_fit_score: int, stale_days: int = STALE_POSTING_DAYS) -> tuple[int, bool]:
     age_days = infer_posting_age_days(job)
     if age_days is None:
         return 0, False
-    if age_days > STALE_POSTING_DAYS and base_fit_score < 90:
+    if age_days > stale_days and base_fit_score < 90:
         return 0, True
     if age_days <= 7:
         return 10, False
@@ -317,7 +318,7 @@ def build_decision_record(
     workflow: str,
     job: dict[str, Any],
     fit: dict[str, Any],
-    action: str,
+    action: DecisionAction,
     final_score: int,
     freshness_points: int,
     source_points: int,
@@ -351,7 +352,12 @@ def build_decision_record(
     )
 
 
-def decide_job_action(job: dict[str, Any], fit: dict[str, Any], candidate_profile: dict[str, Any], snapshot: StrategySnapshot) -> tuple[str, int, str, int, int, int, int]:
+def decide_job_action(
+    job: dict[str, Any],
+    fit: dict[str, Any],
+    candidate_profile: dict[str, Any],
+    snapshot: StrategySnapshot,
+) -> tuple[DecisionAction, int, str, int, int, int, int]:
     thresholds = resolve_decision_thresholds(candidate_profile)
     base_fit_score = int(fit.get("fit_score") or 0)
 
@@ -359,7 +365,7 @@ def decide_job_action(job: dict[str, Any], fit: dict[str, Any], candidate_profil
     if salary_min is not None and int(salary_min) < int(candidate_profile["salary_floor"]):
         return "skip", base_fit_score, "Listed salary is below the configured floor.", 0, 0, 0, 0
 
-    freshness_points, stale_skip = freshness_bonus(job, base_fit_score)
+    freshness_points, stale_skip = freshness_bonus(job, base_fit_score, thresholds["stale_days"])
     if stale_skip:
         return "skip", base_fit_score, "Posting appears stale and fit is not strong enough to keep.", 0, 0, 0, 0
 
@@ -392,12 +398,9 @@ def due_follow_up_datetime(reference: datetime | None = None) -> datetime:
 
 def tracker_due_follow_ups(tracker_rows: list[dict[str, Any]]) -> list[FollowUpTask]:
     tasks: list[FollowUpTask] = []
-    positive_statuses = {"Interview Requested", "Assessment Requested", "Offer", "Rejected"}
     for row in tracker_rows:
         status = str(row.get("status") or "")
         if status != "Applied":
-            continue
-        if status in positive_statuses:
             continue
         applied_at = parse_date(row.get("applied_date"))
         if applied_at is None:
@@ -771,11 +774,12 @@ class JobSearchOrchestrator:
                 email_body=message.get("body", ""),
             )
             matched = match_email_to_tracker_row_payload(classified_email=classified, tracker_rows=tracker_rows)
-            matched_row = matched.get("row") or {}
-            duplicate_key = matched_row.get("duplicate_key") or build_duplicate_key(
+            matched_row = matched.get("row") if matched.get("matched") else None
+            matched_context = matched_row or {}
+            duplicate_key = matched_context.get("duplicate_key") or build_duplicate_key(
                 classified.get("company"),
                 classified.get("role_title"),
-                matched_row.get("location"),
+                matched_context.get("location"),
             )
             output.gmail_updates.append(
                 GmailUpdate(
@@ -784,7 +788,7 @@ class JobSearchOrchestrator:
                     role_title=classified.get("role_title"),
                     deadline=classified.get("deadline"),
                     action=classified.get("action"),
-                    matched_duplicate_key=matched_row.get("duplicate_key"),
+                    matched_duplicate_key=matched_context.get("duplicate_key"),
                     confidence=matched.get("confidence"),
                 )
             )
@@ -794,11 +798,11 @@ class JobSearchOrchestrator:
                     event_id=str(uuid.uuid4()),
                     timestamp=isoformat(parse_date(message.get("date")) or utc_now()),
                     duplicate_key=duplicate_key,
-                    company=classified.get("company") or matched_row.get("company"),
-                    role_title=classified.get("role_title") or matched_row.get("role_title"),
-                    role_slug=role_slug(classified.get("role_title") or matched_row.get("role_title")),
-                    source=matched_row.get("source"),
-                    industry=matched_row.get("industry"),
+                    company=classified.get("company") or matched_context.get("company"),
+                    role_title=classified.get("role_title") or matched_context.get("role_title"),
+                    role_slug=role_slug(classified.get("role_title") or matched_context.get("role_title")),
+                    source=matched_context.get("source"),
+                    industry=matched_context.get("industry"),
                     event_type=classification_to_event_type(classified["classification"]),
                     metadata={"subject": message.get("subject"), "from": message.get("from")},
                 )
@@ -810,8 +814,8 @@ class JobSearchOrchestrator:
             if classified["classification"] in IMMEDIATE_REVIEW_CLASSIFICATIONS:
                 task = build_follow_up_task(
                     duplicate_key=duplicate_key,
-                    company=classified.get("company") or matched_row.get("company"),
-                    role_title=classified.get("role_title") or matched_row.get("role_title"),
+                    company=classified.get("company") or matched_context.get("company"),
+                    role_title=classified.get("role_title") or matched_context.get("role_title"),
                     due_at=utc_now(),
                     reason=f"{classified['classification']} requires immediate review.",
                 )
@@ -828,7 +832,7 @@ class JobSearchOrchestrator:
             if sheet_result.get("implemented", False):
                 tracker_row = build_tracker_row_from_email_update(
                     classified_email=classified,
-                    matched_row=matched_row if matched.get("matched") else None,
+                    matched_row=matched_row,
                     message=message,
                 )
                 upsert_result = upsert_tracker_row_impl(
