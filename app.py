@@ -8,7 +8,9 @@ from dotenv import load_dotenv
 
 from job_agent.agents.coordinator import build_coordinator_agent
 from job_agent.config import load_candidate_profile
+from job_agent.docs.service import ExplainService
 from job_agent.models import ReviewItem, WorkflowOutput, normalize_workflow_output
+from job_agent.state import RedisStateStore
 from job_agent.workflows import run_preset_workflow
 
 MAX_AUTO_FOLLOW_UP_ROUNDS = 5
@@ -25,6 +27,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         help="Optional free-form instruction. Overrides the workflow preset prompt.",
+    )
+    parser.add_argument(
+        "--explain",
+        help="Answer a question from generated docs plus recent workflow state.",
     )
     return parser.parse_args()
 
@@ -72,7 +78,15 @@ def main() -> None:
     args = parse_args()
 
     candidate_profile = load_candidate_profile()
-    if args.input:
+    if args.explain:
+        state_store = RedisStateStore.from_env()
+        strategy_snapshot = state_store.get_strategy_snapshot(candidate_profile)
+        payload = ExplainService(
+            candidate_profile=candidate_profile,
+            state_store=state_store,
+            strategy_snapshot=strategy_snapshot,
+        ).explain(args.explain).model_dump()
+    elif args.input:
         payload = run_free_form_workflow(candidate_profile, args.input).model_dump()
     else:
         payload = run_preset_workflow(args.workflow, candidate_profile).model_dump()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any
 
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from job_agent.config import get_model_name
 from job_agent.events import WorkflowEvent
 from job_agent.models import QAResult
-from job_agent.state import QAEvaluationRecord, StateStore, WEIGHT_DELTA_CAP, isoformat
+from job_agent.state import QAEvaluationRecord, QAVerdict, StateStore, WEIGHT_DELTA_CAP, isoformat
 from job_agent.tools.dedupe import normalize_text
 from job_agent.tools.jobs import SOURCE_DISPLAY_NAMES, keyword_match_count, location_matches, salary_meets_floor
 from job_agent.tools.sheets import rows_match
@@ -27,7 +27,6 @@ JOB_ACTIONABLE_EMAIL_CLASSIFICATIONS = {
 
 HIGH_SIGNAL_SOURCES = {"company_sites", "greenhouse", "lever", "workday", "ashby"}
 MID_SIGNAL_SOURCES = {"linkedin", "smartrecruiters", "google_jobs"}
-QAVerdict = Literal["approve", "flag", "reject"]
 
 
 class QAJudgeAdjustment(BaseModel):
@@ -308,7 +307,7 @@ class QAEventDispatcher:
         score = clamp_score(sum(score_breakdown.values()))
 
         reasons: list[str] = []
-        hard_verdict: str | None = None
+        hard_verdict: QAVerdict | None = None
         if title_match:
             reasons.append("Role title aligns with target roles.")
         else:
@@ -401,7 +400,7 @@ class QAEventDispatcher:
         score = clamp_score(sum(score_breakdown.values()))
 
         reasons = [f"Email classified as {classification}."]
-        hard_verdict: str | None = None
+        hard_verdict: QAVerdict | None = None
         if classification == "Unclear":
             reasons.append("Classification confidence is too weak for autonomous tracker changes.")
             hard_verdict = "flag"
@@ -487,7 +486,7 @@ class QAEventDispatcher:
         score = clamp_score(sum(score_breakdown.values()))
 
         reasons: list[str] = []
-        hard_verdict: str | None = None
+        hard_verdict: QAVerdict | None = None
         if evidence_value == 0.0:
             reasons.append("There is no recent evidence to justify a strategy rewrite.")
             hard_verdict = "flag"

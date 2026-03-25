@@ -4,10 +4,11 @@ import json
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, Field
 
+from job_agent.docs.models import DocumentationEvent, DocumentationStateSnapshot
 from job_agent.tools.dedupe import normalize_text
 
 try:
@@ -25,9 +26,13 @@ OUTCOMES_KEY = f"{STATE_NAMESPACE}:outcomes"
 PLAN_RUNS_KEY = f"{STATE_NAMESPACE}:plan_runs"
 FOLLOW_UPS_KEY = f"{STATE_NAMESPACE}:follow_ups"
 QA_EVALUATIONS_KEY = f"{STATE_NAMESPACE}:qa_evaluations"
+DOCUMENTATION_EVENTS_KEY = f"{STATE_NAMESPACE}:documentation_events"
+DOCUMENTATION_STATE_KEY = f"{STATE_NAMESPACE}:documentation_state"
 MAX_HISTORY_ITEMS = 500
 WEIGHT_DELTA_CAP = 0.4
 ModelT = TypeVar("ModelT", bound=BaseModel)
+DecisionAction = Literal["prioritize", "track", "queue_review", "follow_up_due", "skip"]
+QAVerdict = Literal["approve", "flag", "reject"]
 
 
 def utc_now() -> datetime:
@@ -86,7 +91,7 @@ class DecisionRecord(BaseModel):
     role_slug: str | None = None
     industry: str | None = None
     source: str | None = None
-    action: Literal["prioritize", "track", "queue_review", "follow_up_due", "skip"]
+    action: DecisionAction
     final_score: int
     base_fit_score: int
     freshness_bonus: int = 0
@@ -141,7 +146,7 @@ class QAEvaluationRecord(BaseModel):
     event_type: str
     stage: str
     entity_key: str | None = None
-    verdict: Literal["approve", "flag", "reject"]
+    verdict: QAVerdict
     score: float
     approve_threshold: float
     flag_threshold: float
@@ -198,6 +203,18 @@ class StateStore:
     def list_qa_evaluations(self, *, lookback_days: int | None = None) -> list[QAEvaluationRecord]:
         raise NotImplementedError
 
+    def append_documentation_event(self, event: DocumentationEvent) -> None:
+        raise NotImplementedError
+
+    def list_documentation_events(self, *, lookback_days: int | None = None) -> list[DocumentationEvent]:
+        raise NotImplementedError
+
+    def get_documentation_state(self) -> DocumentationStateSnapshot | None:
+        raise NotImplementedError
+
+    def save_documentation_state(self, snapshot: DocumentationStateSnapshot) -> None:
+        raise NotImplementedError
+
 
 class NullStateStore(StateStore):
     def __init__(self, reason: str) -> None:
@@ -244,6 +261,18 @@ class NullStateStore(StateStore):
 
     def list_qa_evaluations(self, *, lookback_days: int | None = None) -> list[QAEvaluationRecord]:
         return []
+
+    def append_documentation_event(self, event: DocumentationEvent) -> None:
+        return None
+
+    def list_documentation_events(self, *, lookback_days: int | None = None) -> list[DocumentationEvent]:
+        return []
+
+    def get_documentation_state(self) -> DocumentationStateSnapshot | None:
+        return None
+
+    def save_documentation_state(self, snapshot: DocumentationStateSnapshot) -> None:
+        return None
 
 
 def build_default_subgoals(candidate_profile: dict[str, Any]) -> list[Subgoal]:
@@ -328,7 +357,7 @@ class RedisStateStore(StateStore):
         payload = self.client.get(key)
         if not payload:
             return None
-        return cast(ModelT, model_cls.model_validate_json(payload))
+        return model_cls.model_validate_json(payload)
 
     def _set_model(self, key: str, model: BaseModel) -> None:
         self.client.set(key, model.model_dump_json())
@@ -340,7 +369,7 @@ class RedisStateStore(StateStore):
     def _load_list(self, key: str, model_cls: type[ModelT], *, lookback_days: int | None = None) -> list[ModelT]:
         items: list[ModelT] = []
         for payload in self.client.lrange(key, 0, MAX_HISTORY_ITEMS - 1):
-            item = cast(ModelT, model_cls.model_validate_json(payload))
+            item = model_cls.model_validate_json(payload)
             timestamp = getattr(item, "timestamp", None)
             if timestamp and not within_lookback(timestamp, lookback_days):
                 continue
@@ -379,13 +408,13 @@ class RedisStateStore(StateStore):
         self._push_model(OUTCOMES_KEY, event)
 
     def list_decisions(self, *, lookback_days: int | None = None) -> list[DecisionRecord]:
-        return self._load_list(DECISIONS_KEY, DecisionRecord, lookback_days=lookback_days)
+        return [item for item in self._load_list(DECISIONS_KEY, DecisionRecord, lookback_days=lookback_days)]
 
     def list_outcomes(self, *, lookback_days: int | None = None) -> list[OutcomeEvent]:
-        return self._load_list(OUTCOMES_KEY, OutcomeEvent, lookback_days=lookback_days)
+        return [item for item in self._load_list(OUTCOMES_KEY, OutcomeEvent, lookback_days=lookback_days)]
 
     def list_follow_up_tasks(self) -> list[FollowUpTask]:
-        items = self._load_list(FOLLOW_UPS_KEY, FollowUpTask)
+        items = [item for item in self._load_list(FOLLOW_UPS_KEY, FollowUpTask)]
         return [item for item in items if item.status == "planned"]
 
     def save_follow_up_task(self, task: FollowUpTask) -> None:
@@ -419,7 +448,22 @@ class RedisStateStore(StateStore):
         self._push_model(QA_EVALUATIONS_KEY, evaluation)
 
     def list_qa_evaluations(self, *, lookback_days: int | None = None) -> list[QAEvaluationRecord]:
-        return self._load_list(QA_EVALUATIONS_KEY, QAEvaluationRecord, lookback_days=lookback_days)
+        return [item for item in self._load_list(QA_EVALUATIONS_KEY, QAEvaluationRecord, lookback_days=lookback_days)]
+
+    def append_documentation_event(self, event: DocumentationEvent) -> None:
+        self._push_model(DOCUMENTATION_EVENTS_KEY, event)
+
+    def list_documentation_events(self, *, lookback_days: int | None = None) -> list[DocumentationEvent]:
+        return [item for item in self._load_list(DOCUMENTATION_EVENTS_KEY, DocumentationEvent, lookback_days=lookback_days)]
+
+    def get_documentation_state(self) -> DocumentationStateSnapshot | None:
+        current = self._get_model(DOCUMENTATION_STATE_KEY, DocumentationStateSnapshot)
+        if current is not None:
+            return current
+        return None
+
+    def save_documentation_state(self, snapshot: DocumentationStateSnapshot) -> None:
+        self._set_model(DOCUMENTATION_STATE_KEY, snapshot)
 
 
 def clamp_weight(value: float) -> float:

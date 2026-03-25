@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from job_agent.docs.models import BehaviorManifest, DocumentationEvent, DocumentationStateSnapshot
 from job_agent.orchestrator import decide_job_action, due_follow_up_datetime, reflect_strategy, tracker_due_follow_ups
 from job_agent.state import (
     ACTIVE_GOAL_KEY,
     CURRENT_STRATEGY_KEY,
     DecisionRecord,
+    DOCUMENTATION_EVENTS_KEY,
+    DOCUMENTATION_STATE_KEY,
     GoalState,
     OutcomeEvent,
     QAEvaluationRecord,
@@ -147,6 +150,44 @@ def test_redis_state_store_persists_qa_evaluations() -> None:
     assert QA_EVALUATIONS_KEY in client.lists
     assert len(stored) == 1
     assert stored[0].verdict == "flag"
+
+
+def test_redis_state_store_persists_documentation_state_and_events() -> None:
+    client = FakeRedisClient()
+    store = RedisStateStore(client)
+
+    event = DocumentationEvent(
+        event_id="doc_evt_1",
+        timestamp=isoformat(datetime(2026, 1, 12, tzinfo=UTC)),
+        event_type="decision_policy_changed",
+        summary="Updated decision thresholds.",
+        reason="Changed fields: thresholds.",
+        impact="Job scoring changed.",
+    )
+    snapshot = DocumentationStateSnapshot(
+        updated_at=isoformat(datetime(2026, 1, 12, tzinfo=UTC)),
+        behavior_version="1.1.0",
+        manifest=BehaviorManifest(
+            created_at=isoformat(datetime(2026, 1, 12, tzinfo=UTC)),
+            manifest_hash="manifest_hash",
+            component_hashes={"decision_policy": "abc"},
+        ),
+        artifacts=[],
+        versions=[],
+    )
+
+    store.append_documentation_event(event)
+    store.save_documentation_state(snapshot)
+
+    stored_events = store.list_documentation_events()
+    stored_snapshot = store.get_documentation_state()
+
+    assert DOCUMENTATION_EVENTS_KEY in client.lists
+    assert DOCUMENTATION_STATE_KEY in client.values
+    assert len(stored_events) == 1
+    assert stored_events[0].event_type == "decision_policy_changed"
+    assert stored_snapshot is not None
+    assert stored_snapshot.behavior_version == "1.1.0"
 
 
 def test_decide_job_action_applies_thresholds_and_stale_skip() -> None:

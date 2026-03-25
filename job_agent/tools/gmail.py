@@ -98,18 +98,7 @@ def load_gmail_credentials():
     else:
         flow = InstalledAppFlow.from_client_secrets_file(client_secret_file, GMAIL_READONLY_SCOPES)
 
-    credentials: Any
-    if use_console:
-        console_runner = getattr(flow, "run_console", None)
-        if callable(console_runner):
-            credentials = cast(Any, console_runner())
-        else:
-            raise RuntimeError(
-                "GMAIL_OAUTH_USE_CONSOLE is enabled, but this google-auth-oauthlib version does not support console OAuth. "
-                "Disable GMAIL_OAUTH_USE_CONSOLE or upgrade the package."
-            )
-    else:
-        credentials = flow.run_local_server(port=0)
+    credentials = cast(Any, flow).run_console() if use_console else flow.run_local_server(port=0)
     with open(token_file, "w", encoding="utf-8") as handle:
         handle.write(credentials.to_json())
     return credentials
@@ -188,7 +177,8 @@ def match_email_to_tracker_row_payload(
             best_match = row
             best_score = score
 
-    matched = bool(best_match and best_score > 0)
+    matched = best_match is not None and best_score > 0
+
     return {
         "matched": matched,
         "confidence": 0.8 if best_score >= 2 else 0.55 if best_score == 1 else 0.2,

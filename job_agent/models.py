@@ -6,6 +6,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from job_agent.docs.models import DocumentationUpdate
+from job_agent.state import QAVerdict
+
 
 class SummaryCounts(BaseModel):
     jobs_reviewed: int = 0
@@ -65,7 +68,7 @@ class QAResult(BaseModel):
     event_type: str
     stage: str
     entity_key: str | None = None
-    verdict: Literal["approve", "flag", "reject"]
+    verdict: QAVerdict
     score: float
     approve_threshold: float
     flag_threshold: float
@@ -87,6 +90,7 @@ class WorkflowOutput(BaseModel):
     gmail_updates: list[GmailUpdate] = Field(default_factory=list)
     tracker_updates: list[TrackerUpdate] = Field(default_factory=list)
     qa_results: list[QAResult] = Field(default_factory=list)
+    documentation_updates: list[DocumentationUpdate] = Field(default_factory=list)
     needs_review: list[ReviewItem] = Field(default_factory=list)
     follow_up_questions: list[FollowUpQuestion] = Field(default_factory=list)
     assistant_response: str | None = None

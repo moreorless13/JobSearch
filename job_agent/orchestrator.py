@@ -4,12 +4,14 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
-from typing import Any, Literal
+from typing import Any
 
+from job_agent.docs.service import DocumentationService
 from job_agent.events import WorkflowEvent
 from job_agent.models import GmailUpdate, JobRecord, QAResult, ReviewItem, TrackerUpdate, WorkflowOutput
 from job_agent.qa import QAEventDispatcher
 from job_agent.state import (
+    DecisionAction,
     DecisionRecord,
     FollowUpTask,
     GoalState,
@@ -53,7 +55,6 @@ IMMEDIATE_REVIEW_CLASSIFICATIONS = {"Interview Request", "Assessment Request", "
 STALE_POSTING_DAYS = 21
 REFLECTION_LOOKBACK_DAYS = 14
 FOLLOW_UP_DAYS = 3
-DecisionAction = Literal["prioritize", "track", "queue_review", "follow_up_due", "skip"]
 
 
 def dedupe_list(values: list[str]) -> list[str]:
@@ -614,6 +615,11 @@ class JobSearchOrchestrator:
         self.goal_state = self.state_store.ensure_goal_state(candidate_profile)
         self.strategy_snapshot = self.state_store.get_strategy_snapshot(candidate_profile) or build_default_strategy_snapshot(candidate_profile)
         self.qa_dispatcher = QAEventDispatcher(candidate_profile, self.state_store)
+        self.documentation_service = DocumentationService(
+            candidate_profile=candidate_profile,
+            state_store=self.state_store,
+            strategy_snapshot=self.strategy_snapshot,
+        )
 
     def _append_degraded_mode_notice(self, output: WorkflowOutput) -> None:
         if not self.state_store.status.available and not any(item.kind == "state_store_unavailable" for item in output.needs_review):
@@ -662,6 +668,10 @@ class JobSearchOrchestrator:
             role_title=role_title,
         )
 
+    def _refresh_documentation(self, workflow: str, output: WorkflowOutput) -> None:
+        self.documentation_service.strategy_snapshot = self.strategy_snapshot
+        self.documentation_service.refresh(workflow=workflow, output=output)
+
     def _sync_job_to_tracker(self, output: WorkflowOutput, job: JobRecord, *, action: str) -> None:
         if action not in {"prioritize", "track"}:
             return
@@ -700,7 +710,7 @@ class JobSearchOrchestrator:
             )
         )
 
-    def run_jobs(self) -> WorkflowOutput:
+    def run_jobs(self, *, refresh_docs: bool = True) -> WorkflowOutput:
         output = WorkflowOutput()
         sheet_result = read_tracker_sheet_impl(self.candidate_profile["sheet_url"])
         tracker_rows = sheet_result.get("rows", []) if sheet_result.get("implemented", False) else []
@@ -726,6 +736,8 @@ class JobSearchOrchestrator:
                 reason="Job search could not be completed because the search tool failed or is unavailable.",
                 details=search_result.get("reason"),
             )
+            if refresh_docs:
+                self._refresh_documentation("jobs", output)
             return output
 
         for note in search_result.get("notes", []):
@@ -795,9 +807,11 @@ class JobSearchOrchestrator:
         output.summary.jobs_added = kept_count
         if kept_count:
             output.assistant_response = f"Reviewed {output.summary.jobs_reviewed} jobs and kept {kept_count} after deterministic scoring."
+        if refresh_docs:
+            self._refresh_documentation("jobs", output)
         return output
 
-    def run_gmail(self) -> WorkflowOutput:
+    def run_gmail(self, *, refresh_docs: bool = True) -> WorkflowOutput:
         output = WorkflowOutput()
         sheet_result = read_tracker_sheet_impl(self.candidate_profile["sheet_url"])
         tracker_rows = sheet_result.get("rows", []) if sheet_result.get("implemented", False) else []
@@ -820,6 +834,8 @@ class JobSearchOrchestrator:
                 reason="Gmail updates could not be processed because the Gmail integration is unavailable.",
                 details=gmail_result.get("reason"),
             )
+            if refresh_docs:
+                self._refresh_documentation("gmail", output)
             return output
 
         processed_count = 0
@@ -955,9 +971,11 @@ class JobSearchOrchestrator:
         output.summary.gmail_updates_processed = processed_count
         if processed_count:
             output.assistant_response = f"Processed {processed_count} Gmail updates and surfaced any immediate review items."
+        if refresh_docs:
+            self._refresh_documentation("gmail", output)
         return output
 
-    def run_reflect(self) -> WorkflowOutput:
+    def run_reflect(self, *, refresh_docs: bool = True) -> WorkflowOutput:
         output = WorkflowOutput()
         sheet_result = read_tracker_sheet_impl(self.candidate_profile["sheet_url"])
         tracker_rows = sheet_result.get("rows", []) if sheet_result.get("implemented", False) else []
@@ -994,22 +1012,27 @@ class JobSearchOrchestrator:
             if updated_goal_state is not None:
                 self.state_store.save_goal_state(updated_goal_state)
             output.assistant_response = updated_snapshot.reflection_summary
+            if refresh_docs:
+                self._refresh_documentation("reflect", output)
             return output
 
         self._append_qa_review(output, qa_result=qa_result, company=None, role_title=None)
         output.assistant_response = f"QA blocked reflection persistence. {updated_snapshot.reflection_summary}"
+        if refresh_docs:
+            self._refresh_documentation("reflect", output)
         return output
 
     def run_daily(self) -> WorkflowOutput:
-        jobs_output = self.run_jobs()
-        gmail_output = self.run_gmail()
-        reflect_output = self.run_reflect()
+        jobs_output = self.run_jobs(refresh_docs=False)
+        gmail_output = self.run_gmail(refresh_docs=False)
+        reflect_output = self.run_reflect(refresh_docs=False)
         merged = WorkflowOutput(
             summary=jobs_output.summary.model_copy(deep=True),
             new_jobs=[*jobs_output.new_jobs],
             gmail_updates=[*gmail_output.gmail_updates],
             tracker_updates=[*jobs_output.tracker_updates, *gmail_output.tracker_updates],
             qa_results=[*jobs_output.qa_results, *gmail_output.qa_results, *reflect_output.qa_results],
+            documentation_updates=[],
             needs_review=[*jobs_output.needs_review, *gmail_output.needs_review, *reflect_output.needs_review],
             follow_up_questions=[],
             assistant_response=reflect_output.assistant_response or gmail_output.assistant_response or jobs_output.assistant_response,
@@ -1023,4 +1046,5 @@ class JobSearchOrchestrator:
         merged.summary.qa_approved += gmail_output.summary.qa_approved + reflect_output.summary.qa_approved
         merged.summary.qa_flagged += gmail_output.summary.qa_flagged + reflect_output.summary.qa_flagged
         merged.summary.qa_rejected += gmail_output.summary.qa_rejected + reflect_output.summary.qa_rejected
+        self._refresh_documentation("daily", merged)
         return merged
