@@ -1,6 +1,6 @@
 # Architecture Overview
 
-Current behavior version: `1.0.0`
+Current behavior version: `1.1.1`
 
 The system finds jobs, scores them, scans Gmail for updates, syncs the tracker, and reflects on outcomes to adjust strategy.
 
@@ -13,9 +13,9 @@ The system finds jobs, scores them, scans Gmail for updates, syncs the tracker, 
 
 ## Agent Graph
 
-- `CoordinatorAgent` hands off to GmailMonitorAgent, JobSearchAgent, TrackerAgent and uses tools: none.
-- `GmailMonitorAgent` hands off to no specialists and uses tools: classify_job_email, match_email_to_tracker, read_tracker_sheet, search_gmail_job_updates, upsert_tracker_row.
-- `JobSearchAgent` hands off to no specialists and uses tools: score_job_fit, search_jobs.
+- `CoordinatorAgent` hands off to JobSearchAgent, TrackerAgent, GmailMonitorAgent and uses tools: none.
+- `GmailMonitorAgent` hands off to no specialists and uses tools: search_gmail_job_updates, classify_job_email, match_email_to_tracker, read_tracker_sheet, upsert_tracker_row.
+- `JobSearchAgent` hands off to no specialists and uses tools: search_jobs, score_job_fit.
 - `TrackerAgent` hands off to no specialists and uses tools: read_tracker_sheet, upsert_tracker_row.
 
 ## Tool Surface

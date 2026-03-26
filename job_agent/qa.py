@@ -3,10 +3,9 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
-from openai import OpenAI
-from pydantic import BaseModel, Field
+import pydantic as pydantic_module
 
 from job_agent.config import get_model_name
 from job_agent.events import WorkflowEvent
@@ -15,6 +14,9 @@ from job_agent.state import QAEvaluationRecord, QAVerdict, StateStore, WEIGHT_DE
 from job_agent.tools.dedupe import normalize_text
 from job_agent.tools.jobs import SOURCE_DISPLAY_NAMES, keyword_match_count, location_matches, salary_meets_floor
 from job_agent.tools.sheets import rows_match
+
+BaseModel = cast(Any, pydantic_module).BaseModel
+Field = cast(Any, pydantic_module).Field
 
 JOB_ACTIONABLE_EMAIL_CLASSIFICATIONS = {
     "Application Confirmation",
@@ -125,6 +127,61 @@ class QAEventDispatcher:
         self.llm_judge_enabled = bool(llm_enabled)
         self.duplicate_company_cooldown_days = int(qa_settings.get("duplicate_company_cooldown_days", 7))
 
+    def _persist_result(
+        self,
+        *,
+        workflow: str,
+        event_type: WorkflowEvent,
+        context: dict[str, Any],
+        result: QAResult,
+    ) -> None:
+        self.state_store.append_qa_evaluation(
+            QAEvaluationRecord(
+                evaluation_id=str(uuid.uuid4()),
+                timestamp=isoformat(datetime.now(UTC)),
+                workflow=workflow,
+                event_type=result.event_type,
+                stage=result.stage,
+                entity_key=result.entity_key,
+                verdict=result.verdict,
+                score=result.score,
+                approve_threshold=result.approve_threshold,
+                flag_threshold=result.flag_threshold,
+                blocked_action=result.blocked_action,
+                recommended_action=result.recommended_action,
+                reasons=result.reasons,
+                score_breakdown=result.score_breakdown,
+                metadata={"event_type": event_type.value, "context_keys": sorted(context.keys())},
+            )
+        )
+
+    def _build_result(
+        self,
+        *,
+        event_type: WorkflowEvent,
+        stage: str,
+        entity_key: str | None,
+        verdict: QAVerdict,
+        score: float,
+        blocked_action: str | None,
+        recommended_action: str,
+        reasons: list[str],
+        score_breakdown: dict[str, float],
+    ) -> QAResult:
+        return QAResult(
+            event_type=event_type.value,
+            stage=stage,
+            entity_key=entity_key,
+            verdict=verdict,
+            score=score,
+            approve_threshold=self.approve_threshold,
+            flag_threshold=self.flag_threshold,
+            blocked_action=blocked_action,
+            recommended_action=recommended_action,
+            reasons=reasons,
+            score_breakdown=score_breakdown,
+        )
+
     def evaluate(
         self,
         *,
@@ -160,25 +217,7 @@ class QAEventDispatcher:
         if self.llm_judge_enabled and not hard_failure and self._should_use_llm_judge(event_type=event_type, result=result, payload=payload):
             result = self._apply_llm_adjustment(result=result, event_type=event_type, payload=payload, context=context)
 
-        self.state_store.append_qa_evaluation(
-            QAEvaluationRecord(
-                evaluation_id=str(uuid.uuid4()),
-                timestamp=isoformat(datetime.now(UTC)),
-                workflow=workflow,
-                event_type=result.event_type,
-                stage=result.stage,
-                entity_key=result.entity_key,
-                verdict=result.verdict,
-                score=result.score,
-                approve_threshold=result.approve_threshold,
-                flag_threshold=result.flag_threshold,
-                blocked_action=result.blocked_action,
-                recommended_action=result.recommended_action,
-                reasons=result.reasons,
-                score_breakdown=result.score_breakdown,
-                metadata={"event_type": event_type.value, "context_keys": sorted(context.keys())},
-            )
-        )
+        self._persist_result(workflow=workflow, event_type=event_type, context=context, result=result)
         return result
 
     def _should_use_llm_judge(self, *, event_type: WorkflowEvent, result: QAResult, payload: dict[str, Any]) -> bool:
@@ -220,7 +259,9 @@ class QAEventDispatcher:
         context: dict[str, Any],
         result: QAResult,
     ) -> QAJudgeAdjustment:
-        client = OpenAI()
+        import openai as openai_module
+
+        client = cast(Any, openai_module).OpenAI()
         prompt = (
             "You are reviewing an automated job-search QA verdict.\n"
             f"Event type: {event_type.value}\n"
@@ -347,14 +388,12 @@ class QAEventDispatcher:
             recommended_action = "skip_job"
 
         return (
-            QAResult(
-                event_type=WorkflowEvent.JOB_FOUND.value,
+            self._build_result(
+                event_type=WorkflowEvent.JOB_FOUND,
                 stage=stage,
                 entity_key=entity_key,
                 verdict=verdict,
                 score=score,
-                approve_threshold=self.approve_threshold,
-                flag_threshold=self.flag_threshold,
                 blocked_action=blocked_action,
                 recommended_action=recommended_action,
                 reasons=reasons,
@@ -420,14 +459,12 @@ class QAEventDispatcher:
             recommended_action = "manual_review"
 
         return (
-            QAResult(
-                event_type=WorkflowEvent.EMAIL_RECEIVED.value,
+            self._build_result(
+                event_type=WorkflowEvent.EMAIL_RECEIVED,
                 stage=stage,
                 entity_key=entity_key,
                 verdict=verdict,
                 score=score,
-                approve_threshold=self.approve_threshold,
-                flag_threshold=self.flag_threshold,
                 blocked_action=blocked_action,
                 recommended_action=recommended_action,
                 reasons=reasons,
@@ -510,14 +547,12 @@ class QAEventDispatcher:
             recommended_action = "manual_review"
 
         return (
-            QAResult(
-                event_type=WorkflowEvent.STRATEGY_REFLECTED.value,
+            self._build_result(
+                event_type=WorkflowEvent.STRATEGY_REFLECTED,
                 stage=stage,
                 entity_key=entity_key,
                 verdict=verdict,
                 score=score,
-                approve_threshold=self.approve_threshold,
-                flag_threshold=self.flag_threshold,
                 blocked_action=blocked_action,
                 recommended_action=recommended_action,
                 reasons=reasons,

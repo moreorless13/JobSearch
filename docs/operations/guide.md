@@ -1,6 +1,6 @@
 # Operations Guide
 
-Current behavior version: `1.0.0`
+Current behavior version: `1.1.1`
 
 Run the preset workflows through `python app.py --workflow <daily|jobs|gmail|reflect>`.
 

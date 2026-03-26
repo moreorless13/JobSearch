@@ -4,11 +4,17 @@ import json
 import os
 import re
 from copy import deepcopy
-from typing import Any
-
-from agents import function_tool
+from typing import Any, cast
 
 from job_agent.tools.dedupe import build_duplicate_key, normalize_text
+from job_agent.tools._shared import (
+    load_google_credentials,
+    resolve_delegated_google_user,
+    resolve_function_tool,
+)
+
+
+function_tool = resolve_function_tool()
 
 DEFAULT_MATCH_STRATEGY = "hybrid"
 GOOGLE_SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -108,6 +114,10 @@ HEADER_LOOKUP = {
     for canonical, aliases in HEADER_ALIASES.items()
     for alias in [canonical.replace("_", " "), CANONICAL_HEADER_LABELS.get(canonical, canonical), *aliases]
 }
+
+
+def resolve_sheets_delegated_user() -> str | None:
+    return resolve_delegated_google_user()
 
 
 def infer_duplicate_key(row: dict[str, Any]) -> str:
@@ -285,24 +295,22 @@ def find_matching_row(rows: list[dict[str, Any]], candidate: dict[str, Any], mat
 
 
 def load_service_account_credentials():
-    credentials_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    credentials_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-
-    from google.oauth2.service_account import Credentials
-
-    if credentials_json:
-        return Credentials.from_service_account_info(json.loads(credentials_json), scopes=GOOGLE_SHEETS_SCOPES)
-    if credentials_file:
-        return Credentials.from_service_account_file(credentials_file, scopes=GOOGLE_SHEETS_SCOPES)
-    raise RuntimeError(
-        "Google Sheets credentials are not configured. Set GOOGLE_SERVICE_ACCOUNT_FILE or GOOGLE_SERVICE_ACCOUNT_JSON."
+    return load_google_credentials(
+        scopes=GOOGLE_SHEETS_SCOPES,
+        delegated_user=resolve_sheets_delegated_user(),
+        missing_credentials_message=(
+            "Google Sheets credentials are not configured. "
+            "Use Application Default Credentials or set GOOGLE_SERVICE_ACCOUNT_FILE, "
+            "GOOGLE_APPLICATION_CREDENTIALS, or GOOGLE_SERVICE_ACCOUNT_JSON."
+        ),
     )
 
 
 def build_sheets_service():
-    from googleapiclient.discovery import build
+    import googleapiclient.discovery as google_discovery_module
 
     credentials = load_service_account_credentials()
+    build = cast(Any, google_discovery_module).build
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
 

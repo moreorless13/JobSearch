@@ -1,6 +1,6 @@
 # Developer Guide
 
-Current behavior version: `1.0.0`
+Current behavior version: `1.1.1`
 
 Add behavior changes in code, then let the documentation service capture the new manifest and render guides.
 

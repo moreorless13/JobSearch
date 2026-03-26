@@ -6,17 +6,9 @@ import json
 import os
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-try:
-    from openai import OpenAI
-except ImportError:  # pragma: no cover - optional dependency path
-    OpenAI = None  # type: ignore[assignment]
-
-from job_agent.agents.coordinator import build_coordinator_agent
-from job_agent.agents.gmail_monitor import build_gmail_monitor_agent
-from job_agent.agents.job_search import build_job_search_agent
-from job_agent.agents.tracker import build_tracker_agent
+from job_agent.agents._shared import agent_graph_spec
 from job_agent.config import (
     DEFAULT_QA_SETTINGS,
     DEFAULT_WORKFLOW_INPUTS,
@@ -37,6 +29,7 @@ from job_agent.docs.models import (
     ExplanationCitation,
 )
 from job_agent.models import WorkflowOutput
+from job_agent.runtime import DEFAULT_GMAIL_QUERIES, DEFAULT_SEARCH_SOURCES, FOLLOW_UP_DAYS, STALE_POSTING_DAYS
 from job_agent.state import StateStore, isoformat, utc_now
 from job_agent.tools.dedupe import normalize_text
 
@@ -261,8 +254,6 @@ class DocumentationService:
         return updates
 
     def build_manifest(self) -> BehaviorManifest:
-        from job_agent.orchestrator import DEFAULT_GMAIL_QUERIES, DEFAULT_SEARCH_SOURCES, FOLLOW_UP_DAYS, STALE_POSTING_DAYS
-
         workflows = {
             name: {
                 "prompt": prompt,
@@ -351,41 +342,7 @@ class DocumentationService:
         return events
 
     def _build_agent_graph(self) -> dict[str, Any]:
-        try:
-            coordinator = build_coordinator_agent(self.candidate_profile)
-            job_search = build_job_search_agent(self.candidate_profile)
-            tracker = build_tracker_agent(self.candidate_profile)
-            gmail_monitor = build_gmail_monitor_agent(self.candidate_profile)
-            agents = [coordinator, job_search, tracker, gmail_monitor]
-            graph: dict[str, Any] = {}
-            for agent in agents:
-                name = getattr(agent, "name", agent.__class__.__name__)
-                graph[name] = {
-                    "handoffs": sorted(getattr(handoff, "name", str(handoff)) for handoff in getattr(agent, "handoffs", []) or []),
-                    "tools": sorted(self._tool_name(tool) for tool in getattr(agent, "tools", []) or []),
-                    "handoff_description": getattr(agent, "handoff_description", None),
-                }
-            return graph
-        except Exception:
-            return {
-                "CoordinatorAgent": {
-                    "handoffs": ["GmailMonitorAgent", "JobSearchAgent", "TrackerAgent"],
-                    "tools": [],
-                    "handoff_description": "Routes work between job search, tracker, and Gmail specialists.",
-                },
-                "JobSearchAgent": {"handoffs": [], "tools": ["search_jobs", "score_job_fit"]},
-                "TrackerAgent": {"handoffs": [], "tools": ["read_tracker_sheet", "upsert_tracker_row"]},
-                "GmailMonitorAgent": {
-                    "handoffs": [],
-                    "tools": [
-                        "search_gmail_job_updates",
-                        "classify_job_email",
-                        "match_email_to_tracker",
-                        "read_tracker_sheet",
-                        "upsert_tracker_row",
-                    ],
-                },
-            }
+        return agent_graph_spec()
 
     def _build_tool_surface(self, agent_graph: dict[str, Any]) -> dict[str, Any]:
         tool_names = sorted({tool for spec in agent_graph.values() for tool in spec.get("tools", [])})
@@ -472,9 +429,11 @@ class DocumentationService:
         return impacts[event_type]
 
     def _humanize_event(self, event: DocumentationEvent) -> str:
-        if os.getenv("JOB_AGENT_DOCS_LLM_ENABLED", "").lower() in {"1", "true", "yes"} and OpenAI is not None:
+        if os.getenv("JOB_AGENT_DOCS_LLM_ENABLED", "").lower() in {"1", "true", "yes"}:
             try:
-                client = OpenAI()
+                import openai as openai_module
+
+                client = cast(Any, openai_module).OpenAI()
                 prompt = (
                     "Write one short sentence explaining this system change in plain English.\n"
                     f"Event type: {event.event_type}\n"

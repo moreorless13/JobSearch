@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
-from job_agent.docs.service import DocumentationService, ExplainService
 from job_agent.docs.models import DocumentationEvent, DocumentationStateSnapshot
 from job_agent.state import (
     DecisionRecord,
@@ -19,7 +19,7 @@ from job_agent.state import (
 )
 
 
-PROFILE = {
+PROFILE: dict[str, Any] = {
     "candidate_name": "James",
     "location_rules": {
         "allow_remote": True,
@@ -112,20 +112,27 @@ class FakeStateStore(StateStore):
         self.qa_evaluations.append(evaluation)
 
 
-def write_surface_files(prompts_dir, schemas_dir, *, prompt_body: str, schema_body: str) -> None:
+def write_surface_files(prompts_dir: Path, schemas_dir: Path, *, prompt_body: str, schema_body: str) -> None:
     prompts_dir.mkdir(parents=True, exist_ok=True)
     schemas_dir.mkdir(parents=True, exist_ok=True)
     (prompts_dir / "coordinator.txt").write_text(prompt_body, encoding="utf-8")
     (schemas_dir / "normalized_job.json").write_text(schema_body, encoding="utf-8")
 
 
-def test_documentation_service_emits_manifest_change_events_for_policy_prompt_and_schema_updates(tmp_path) -> None:
+def load_docs_service() -> Any:
+    import job_agent.docs.service as docs_service
+
+    return cast(Any, docs_service)
+
+
+def test_documentation_service_emits_manifest_change_events_for_policy_prompt_and_schema_updates(tmp_path: Path) -> None:
+    docs_service = load_docs_service()
     store = FakeStateStore()
     prompts_dir = tmp_path / "prompts"
     schemas_dir = tmp_path / "schemas"
     write_surface_files(prompts_dir, schemas_dir, prompt_body="baseline prompt", schema_body='{"type":"object"}')
 
-    service = DocumentationService(
+    service = docs_service.DocumentationService(
         candidate_profile=PROFILE,
         state_store=store,
         strategy_snapshot=build_default_strategy_snapshot(PROFILE),
@@ -145,7 +152,7 @@ def test_documentation_service_emits_manifest_change_events_for_policy_prompt_an
         "qa": {**PROFILE["qa"], "approve_threshold": 0.85},
     }
     write_surface_files(prompts_dir, schemas_dir, prompt_body="updated prompt", schema_body='{"type":"object","title":"Job"}')
-    service = DocumentationService(
+    service = docs_service.DocumentationService(
         candidate_profile=updated_profile,
         state_store=store,
         strategy_snapshot=build_default_strategy_snapshot(updated_profile),
@@ -162,13 +169,14 @@ def test_documentation_service_emits_manifest_change_events_for_policy_prompt_an
     assert "schema_changed" in event_types
 
 
-def test_documentation_service_is_idempotent_when_nothing_changes(tmp_path) -> None:
+def test_documentation_service_is_idempotent_when_nothing_changes(tmp_path: Path) -> None:
+    docs_service = load_docs_service()
     store = FakeStateStore()
     prompts_dir = tmp_path / "prompts"
     schemas_dir = tmp_path / "schemas"
     write_surface_files(prompts_dir, schemas_dir, prompt_body="baseline prompt", schema_body='{"type":"object"}')
 
-    service = DocumentationService(
+    service = docs_service.DocumentationService(
         candidate_profile=PROFILE,
         state_store=store,
         strategy_snapshot=build_default_strategy_snapshot(PROFILE),
@@ -184,13 +192,14 @@ def test_documentation_service_is_idempotent_when_nothing_changes(tmp_path) -> N
     assert len(store.documentation_events) == 0
 
 
-def test_explain_service_answers_change_and_rejection_questions(tmp_path) -> None:
+def test_explain_service_answers_change_and_rejection_questions(tmp_path: Path) -> None:
+    docs_service = load_docs_service()
     store = FakeStateStore()
     prompts_dir = tmp_path / "prompts"
     schemas_dir = tmp_path / "schemas"
     write_surface_files(prompts_dir, schemas_dir, prompt_body="baseline prompt", schema_body='{"type":"object"}')
 
-    service = DocumentationService(
+    service = docs_service.DocumentationService(
         candidate_profile=PROFILE,
         state_store=store,
         strategy_snapshot=build_default_strategy_snapshot(PROFILE),
@@ -204,7 +213,7 @@ def test_explain_service_answers_change_and_rejection_questions(tmp_path) -> Non
         **PROFILE,
         "decision_thresholds": {**PROFILE["decision_thresholds"], "track": 75},
     }
-    service = DocumentationService(
+    service = docs_service.DocumentationService(
         candidate_profile=updated_profile,
         state_store=store,
         strategy_snapshot=build_default_strategy_snapshot(updated_profile),
@@ -230,7 +239,7 @@ def test_explain_service_answers_change_and_rejection_questions(tmp_path) -> Non
         )
     )
 
-    explain = ExplainService(
+    explain = docs_service.ExplainService(
         candidate_profile=updated_profile,
         state_store=store,
         strategy_snapshot=build_default_strategy_snapshot(updated_profile),

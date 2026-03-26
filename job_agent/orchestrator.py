@@ -10,6 +10,12 @@ from job_agent.docs.service import DocumentationService
 from job_agent.events import WorkflowEvent
 from job_agent.models import GmailUpdate, JobRecord, QAResult, ReviewItem, TrackerUpdate, WorkflowOutput
 from job_agent.qa import QAEventDispatcher
+from job_agent.runtime import (
+    DEFAULT_GMAIL_QUERIES,
+    DEFAULT_SEARCH_SOURCES,
+    FOLLOW_UP_DAYS,
+    STALE_POSTING_DAYS,
+)
 from job_agent.state import (
     DecisionAction,
     DecisionRecord,
@@ -32,29 +38,9 @@ from job_agent.tools.gmail import classify_email_payload, match_email_to_tracker
 from job_agent.tools.jobs import score_job_fit_impl, search_jobs_impl
 from job_agent.tools.sheets import read_tracker_sheet_impl, upsert_tracker_row_impl
 
-DEFAULT_SEARCH_SOURCES = [
-    "linkedin",
-    "indeed",
-    "ziprecruiter",
-    "greenhouse",
-    "lever",
-    "workday",
-    "ashby",
-    "smartrecruiters",
-    "google_jobs",
-    "company_sites",
-]
-
-DEFAULT_GMAIL_QUERIES = [
-    "from:(greenhouse.io OR lever.co OR myworkdayjobs.com OR smartrecruiters.com) newer_than:30d",
-    'subject:("interview" OR "application" OR "offer" OR "assessment" OR "recruiter") newer_than:30d',
-]
-
 POSITIVE_SIGNAL_CLASSIFICATIONS = {"Recruiter Outreach", "Interview Request", "Assessment Request", "Offer"}
 IMMEDIATE_REVIEW_CLASSIFICATIONS = {"Interview Request", "Assessment Request", "Offer"}
-STALE_POSTING_DAYS = 21
 REFLECTION_LOOKBACK_DAYS = 14
-FOLLOW_UP_DAYS = 3
 
 
 def dedupe_list(values: list[str]) -> list[str]:
@@ -213,6 +199,50 @@ def build_tracker_row_from_email_update(
         "notes": "\n".join(line for line in note_lines if line),
         "duplicate_key": (matched_row or {}).get("duplicate_key") or build_duplicate_key(company, role_title, location),
     }
+
+
+def email_duplicate_key(classified_email: dict[str, Any], matched_row: dict[str, Any]) -> str:
+    return matched_row.get("duplicate_key") or build_duplicate_key(
+        classified_email.get("company"),
+        classified_email.get("role_title"),
+        matched_row.get("location"),
+    )
+
+
+def build_gmail_update_record(classified_email: dict[str, Any], matched: dict[str, Any]) -> GmailUpdate:
+    matched_row = matched.get("row") or {}
+    return GmailUpdate(
+        classification=classified_email["classification"],
+        company=classified_email.get("company"),
+        role_title=classified_email.get("role_title"),
+        deadline=classified_email.get("deadline"),
+        action=classified_email.get("action"),
+        matched_duplicate_key=matched_row.get("duplicate_key"),
+        confidence=matched.get("confidence"),
+    )
+
+
+def build_outcome_from_email(
+    *,
+    classified_email: dict[str, Any],
+    matched_row: dict[str, Any],
+    message: dict[str, Any],
+    duplicate_key: str,
+) -> OutcomeEvent:
+    company = classified_email.get("company") or matched_row.get("company")
+    role_title = classified_email.get("role_title") or matched_row.get("role_title")
+    return OutcomeEvent(
+        event_id=str(uuid.uuid4()),
+        timestamp=isoformat(parse_date(message.get("date")) or utc_now()),
+        duplicate_key=duplicate_key,
+        company=company,
+        role_title=role_title,
+        role_slug=role_slug(role_title),
+        source=matched_row.get("source"),
+        industry=matched_row.get("industry"),
+        event_type=classification_to_event_type(classified_email["classification"]),
+        metadata={"subject": message.get("subject"), "from": message.get("from")},
+    )
 
 
 def parse_date(value: str | None) -> datetime | None:
@@ -672,6 +702,55 @@ class JobSearchOrchestrator:
         self.documentation_service.strategy_snapshot = self.strategy_snapshot
         self.documentation_service.refresh(workflow=workflow, output=output)
 
+    def _prepare_tracker_context(self, workflow: str, output: WorkflowOutput) -> tuple[dict[str, Any], list[dict[str, Any]], list[FollowUpTask]]:
+        sheet_result = read_tracker_sheet_impl(self.candidate_profile["sheet_url"])
+        tracker_rows = sheet_result.get("rows", []) if sheet_result.get("implemented", False) else []
+        due_tasks = self._save_plan(workflow, output, tracker_rows=tracker_rows)
+        return sheet_result, tracker_rows, due_tasks
+
+    def _record_tracker_update(
+        self,
+        output: WorkflowOutput,
+        *,
+        persisted_row: dict[str, Any],
+        fallback_row: dict[str, Any],
+        update_type: str,
+        notes: str | None,
+        company: str | None = None,
+        role_title: str | None = None,
+        duplicate_key: str | None = None,
+    ) -> None:
+        output.summary.tracker_rows_updated += 1
+        output.tracker_updates.append(
+            TrackerUpdate(
+                company=company or persisted_row.get("company") or fallback_row.get("company"),
+                role_title=role_title or persisted_row.get("role_title") or fallback_row.get("role_title"),
+                status=str(persisted_row.get("status") or fallback_row.get("status") or ""),
+                duplicate_key=duplicate_key or persisted_row.get("duplicate_key") or fallback_row.get("duplicate_key"),
+                update_type=update_type,
+                notes=notes,
+            )
+        )
+
+    def _append_tracker_write_failure(
+        self,
+        output: WorkflowOutput,
+        *,
+        kind: str,
+        reason: str,
+        details: str | None,
+        company: str | None = None,
+        role_title: str | None = None,
+    ) -> None:
+        append_review(
+            output,
+            kind=kind,
+            reason=reason,
+            details=details,
+            company=company,
+            role_title=role_title,
+        )
+
     def _sync_job_to_tracker(self, output: WorkflowOutput, job: JobRecord, *, action: str) -> None:
         if action not in {"prioritize", "track"}:
             return
@@ -688,7 +767,7 @@ class JobSearchOrchestrator:
             match_strategy="hybrid",
         )
         if not result.get("implemented", True):
-            append_review(
+            self._append_tracker_write_failure(
                 output,
                 kind="tracker_unavailable",
                 reason="Tracker updates could not be applied because Google Sheets is not configured or returned an error.",
@@ -697,24 +776,20 @@ class JobSearchOrchestrator:
                 role_title=job.role_title,
             )
             return
-        output.summary.tracker_rows_updated += 1
-        persisted_row = result.get("row") or {}
-        output.tracker_updates.append(
-            TrackerUpdate(
-                company=job.company,
-                role_title=job.role_title,
-                status=str(persisted_row.get("status") or tracker_row.get("status") or ""),
-                duplicate_key=job.duplicate_key,
-                update_type=str(result.get("status", "updated")),
-                notes=job.reason,
-            )
+        self._record_tracker_update(
+            output,
+            persisted_row=result.get("row") or {},
+            fallback_row=tracker_row,
+            update_type=str(result.get("status", "updated")),
+            notes=job.reason,
+            company=job.company,
+            role_title=job.role_title,
+            duplicate_key=job.duplicate_key,
         )
 
     def run_jobs(self, *, refresh_docs: bool = True) -> WorkflowOutput:
         output = WorkflowOutput()
-        sheet_result = read_tracker_sheet_impl(self.candidate_profile["sheet_url"])
-        tracker_rows = sheet_result.get("rows", []) if sheet_result.get("implemented", False) else []
-        self._save_plan("jobs", output, tracker_rows=tracker_rows)
+        _sheet_result, tracker_rows, _due_tasks = self._prepare_tracker_context("jobs", output)
 
         keywords = build_search_keywords(self.candidate_profile)
         search_result = search_jobs_impl(
@@ -813,9 +888,7 @@ class JobSearchOrchestrator:
 
     def run_gmail(self, *, refresh_docs: bool = True) -> WorkflowOutput:
         output = WorkflowOutput()
-        sheet_result = read_tracker_sheet_impl(self.candidate_profile["sheet_url"])
-        tracker_rows = sheet_result.get("rows", []) if sheet_result.get("implemented", False) else []
-        due_tasks = self._save_plan("gmail", output, tracker_rows=tracker_rows)
+        sheet_result, tracker_rows, due_tasks = self._prepare_tracker_context("gmail", output)
 
         if not sheet_result.get("implemented", False):
             append_review(
@@ -847,22 +920,8 @@ class JobSearchOrchestrator:
             )
             matched = match_email_to_tracker_row_payload(classified_email=classified, tracker_rows=tracker_rows)
             matched_row = matched.get("row") or {}
-            duplicate_key = matched_row.get("duplicate_key") or build_duplicate_key(
-                classified.get("company"),
-                classified.get("role_title"),
-                matched_row.get("location"),
-            )
-            output.gmail_updates.append(
-                GmailUpdate(
-                    classification=classified["classification"],
-                    company=classified.get("company"),
-                    role_title=classified.get("role_title"),
-                    deadline=classified.get("deadline"),
-                    action=classified.get("action"),
-                    matched_duplicate_key=matched_row.get("duplicate_key"),
-                    confidence=matched.get("confidence"),
-                )
-            )
+            duplicate_key = email_duplicate_key(classified, matched_row)
+            output.gmail_updates.append(build_gmail_update_record(classified, matched))
 
             qa_result = self.qa_dispatcher.evaluate(
                 workflow="gmail",
@@ -889,17 +948,11 @@ class JobSearchOrchestrator:
                 continue
 
             self.state_store.append_outcome(
-                OutcomeEvent(
-                    event_id=str(uuid.uuid4()),
-                    timestamp=isoformat(parse_date(message.get("date")) or utc_now()),
+                build_outcome_from_email(
+                    classified_email=classified,
+                    matched_row=matched_row,
+                    message=message,
                     duplicate_key=duplicate_key,
-                    company=classified.get("company") or matched_row.get("company"),
-                    role_title=classified.get("role_title") or matched_row.get("role_title"),
-                    role_slug=role_slug(classified.get("role_title") or matched_row.get("role_title")),
-                    source=matched_row.get("source"),
-                    industry=matched_row.get("industry"),
-                    event_type=classification_to_event_type(classified["classification"]),
-                    metadata={"subject": message.get("subject"), "from": message.get("from")},
                 )
             )
 
@@ -937,20 +990,15 @@ class JobSearchOrchestrator:
                     match_strategy="hybrid",
                 )
                 if upsert_result.get("implemented", False):
-                    output.summary.tracker_rows_updated += 1
-                    persisted_row = upsert_result.get("row") or tracker_row
-                    output.tracker_updates.append(
-                        TrackerUpdate(
-                            company=persisted_row.get("company"),
-                            role_title=persisted_row.get("role_title"),
-                            status=persisted_row.get("status"),
-                            duplicate_key=persisted_row.get("duplicate_key"),
-                            update_type=str(upsert_result.get("status", "updated")),
-                            notes=tracker_row.get("notes"),
-                        )
+                    self._record_tracker_update(
+                        output,
+                        persisted_row=upsert_result.get("row") or tracker_row,
+                        fallback_row=tracker_row,
+                        update_type=str(upsert_result.get("status", "updated")),
+                        notes=tracker_row.get("notes"),
                     )
                 else:
-                    append_review(
+                    self._append_tracker_write_failure(
                         output,
                         kind="gmail_tracker_update_failed",
                         reason="A Gmail-derived tracker update could not be written to Google Sheets.",

@@ -4,12 +4,15 @@ import json
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field
+import pydantic as pydantic_module
 
 from job_agent.docs.models import DocumentationEvent, DocumentationStateSnapshot
 from job_agent.tools.dedupe import normalize_text
+
+BaseModel = cast(Any, pydantic_module).BaseModel
+Field = cast(Any, pydantic_module).Field
 
 try:
     import redis as redis_module
@@ -30,7 +33,6 @@ DOCUMENTATION_EVENTS_KEY = f"{STATE_NAMESPACE}:documentation_events"
 DOCUMENTATION_STATE_KEY = f"{STATE_NAMESPACE}:documentation_state"
 MAX_HISTORY_ITEMS = 500
 WEIGHT_DELTA_CAP = 0.4
-ModelT = TypeVar("ModelT", bound=BaseModel)
 DecisionAction = Literal["prioritize", "track", "queue_review", "follow_up_due", "skip"]
 QAVerdict = Literal["approve", "flag", "reject"]
 
@@ -353,21 +355,21 @@ class RedisStateStore(StateStore):
         except Exception as exc:  # pragma: no cover - covered by degraded-mode tests through monkeypatch
             return NullStateStore(f"Redis is unavailable: {exc}")
 
-    def _get_model(self, key: str, model_cls: type[ModelT]) -> ModelT | None:
+    def _get_model(self, key: str, model_cls: Any) -> Any | None:
         payload = self.client.get(key)
         if not payload:
             return None
         return model_cls.model_validate_json(payload)
 
-    def _set_model(self, key: str, model: BaseModel) -> None:
+    def _set_model(self, key: str, model: Any) -> None:
         self.client.set(key, model.model_dump_json())
 
-    def _push_model(self, key: str, model: BaseModel) -> None:
+    def _push_model(self, key: str, model: Any) -> None:
         self.client.lpush(key, model.model_dump_json())
         self.client.ltrim(key, 0, MAX_HISTORY_ITEMS - 1)
 
-    def _load_list(self, key: str, model_cls: type[ModelT], *, lookback_days: int | None = None) -> list[ModelT]:
-        items: list[ModelT] = []
+    def _load_list(self, key: str, model_cls: Any, *, lookback_days: int | None = None) -> list[Any]:
+        items: list[Any] = []
         for payload in self.client.lrange(key, 0, MAX_HISTORY_ITEMS - 1):
             item = model_cls.model_validate_json(payload)
             timestamp = getattr(item, "timestamp", None)

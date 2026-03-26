@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field, ValidationError
+import pydantic as pydantic_module
 
 from job_agent.docs.models import DocumentationUpdate
 from job_agent.state import QAVerdict
+
+BaseModel = cast(Any, pydantic_module).BaseModel
+Field = cast(Any, pydantic_module).Field
+ValidationError = cast(Any, pydantic_module).ValidationError
 
 
 class SummaryCounts(BaseModel):
@@ -139,59 +143,78 @@ def looks_like_data_entry_response(text: str) -> bool:
     )
 
 
+def review_output(kind: str, reason: str, details: str) -> WorkflowOutput:
+    return finalize_workflow_output(WorkflowOutput(
+        needs_review=[
+            ReviewItem(
+                kind=kind,
+                reason=reason,
+                details=details,
+            )
+        ]
+    ))
+
+
+def try_validate_workflow_output(raw_output: Any) -> WorkflowOutput | None:
+    if hasattr(raw_output, "model_dump"):
+        raw_output = raw_output.model_dump()
+    if not isinstance(raw_output, dict):
+        return None
+    try:
+        return finalize_workflow_output(WorkflowOutput.model_validate(raw_output))
+    except ValidationError:
+        return None
+
+
+def workflow_output_from_text(text: str) -> WorkflowOutput:
+    normalized_text = text.strip()
+    if not normalized_text:
+        return finalize_workflow_output(WorkflowOutput())
+
+    try:
+        parsed_output = json.loads(normalized_text)
+    except json.JSONDecodeError:
+        parsed_output = None
+
+    validated = try_validate_workflow_output(parsed_output)
+    if validated is not None:
+        return validated
+
+    follow_up_questions = extract_follow_up_questions(normalized_text)
+    if follow_up_questions:
+        return finalize_workflow_output(WorkflowOutput(
+            follow_up_questions=follow_up_questions,
+            assistant_response=normalized_text,
+        ))
+
+    if looks_like_data_entry_response(normalized_text):
+        return finalize_workflow_output(WorkflowOutput(assistant_response=normalized_text))
+
+    return finalize_workflow_output(WorkflowOutput(
+        assistant_response=normalized_text,
+        needs_review=[
+            ReviewItem(
+                kind="unstructured_output",
+                reason="Coordinator returned text instead of the required workflow JSON contract.",
+                details=normalized_text,
+            )
+        ]
+    ))
+
+
 def normalize_workflow_output(raw_output: Any) -> WorkflowOutput:
     if isinstance(raw_output, WorkflowOutput):
         return finalize_workflow_output(raw_output)
 
-    if hasattr(raw_output, "model_dump"):
-        raw_output = raw_output.model_dump()
-
-    if isinstance(raw_output, dict):
-        try:
-            return finalize_workflow_output(WorkflowOutput.model_validate(raw_output))
-        except ValidationError:
-            pass
+    validated = try_validate_workflow_output(raw_output)
+    if validated is not None:
+        return validated
 
     if isinstance(raw_output, str):
-        normalized_text = raw_output.strip()
-        try:
-            parsed_output = json.loads(normalized_text)
-        except json.JSONDecodeError:
-            parsed_output = None
+        return workflow_output_from_text(raw_output)
 
-        if isinstance(parsed_output, dict):
-            try:
-                return finalize_workflow_output(WorkflowOutput.model_validate(parsed_output))
-            except ValidationError:
-                pass
-
-        follow_up_questions = extract_follow_up_questions(normalized_text)
-        if follow_up_questions:
-            return finalize_workflow_output(WorkflowOutput(
-                follow_up_questions=follow_up_questions,
-                assistant_response=normalized_text,
-            ))
-
-        if looks_like_data_entry_response(normalized_text):
-            return finalize_workflow_output(WorkflowOutput(assistant_response=normalized_text))
-
-        return finalize_workflow_output(WorkflowOutput(
-            assistant_response=normalized_text,
-            needs_review=[
-                ReviewItem(
-                    kind="unstructured_output",
-                    reason="Coordinator returned text instead of the required workflow JSON contract.",
-                    details=normalized_text,
-                )
-            ]
-        ))
-
-    return finalize_workflow_output(WorkflowOutput(
-        needs_review=[
-            ReviewItem(
-                kind="unexpected_output_type",
-                reason="Coordinator returned a value that could not be normalized into the workflow contract.",
-                details=repr(raw_output),
-            )
-        ]
-    ))
+    return review_output(
+        "unexpected_output_type",
+        "Coordinator returned a value that could not be normalized into the workflow contract.",
+        repr(raw_output),
+    )

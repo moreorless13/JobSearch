@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from typing import Any, Literal, cast
 
-from agents import function_tool
-from openai import OpenAI
-from pydantic import BaseModel, Field
+import pydantic as pydantic_module
 
 from job_agent.config import get_model_name
 from job_agent.tools.dedupe import build_duplicate_key, dedupe_jobs, normalize_text
+from job_agent.tools._shared import resolve_function_tool
+
+
+function_tool = resolve_function_tool()
+BaseModel = cast(Any, pydantic_module).BaseModel
+Field = cast(Any, pydantic_module).Field
 
 FIT_BANDS = (
     (90, "excellent"),
@@ -435,7 +439,9 @@ def perform_web_search_job_lookup(
     salary_floor: int,
     sources: list[str],
 ) -> WebSearchJobsResult:
-    client = OpenAI()
+    import openai as openai_module
+
+    client = cast(Any, openai_module).OpenAI()
     tools: list[dict[str, Any]] = [
         {
             "type": "web_search_preview",

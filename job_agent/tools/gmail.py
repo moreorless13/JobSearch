@@ -6,9 +6,15 @@ import os
 import re
 from typing import Any, cast
 
-from agents import function_tool
-
 from job_agent.tools.dedupe import normalize_text
+from job_agent.tools._shared import (
+    load_google_credentials,
+    resolve_delegated_google_user,
+    resolve_function_tool,
+)
+
+
+function_tool = resolve_function_tool()
 
 GMAIL_READONLY_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 EMAIL_CLASSIFICATIONS = (
@@ -23,91 +29,44 @@ EMAIL_CLASSIFICATIONS = (
 )
 
 
-def resolve_gmail_auth_mode() -> str:
-    has_service_account = bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE"))
-    has_delegated_user = bool(os.getenv("GMAIL_DELEGATED_USER"))
-    has_token = bool(os.getenv("GMAIL_TOKEN_JSON") or os.getenv("GMAIL_TOKEN_FILE"))
-    has_oauth_client = bool(os.getenv("GOOGLE_OAUTH_CLIENT_SECRET_JSON") or os.getenv("GOOGLE_OAUTH_CLIENT_SECRET_FILE"))
+def resolve_delegated_user() -> str | None:
+    return resolve_delegated_google_user()
 
-    if has_service_account and has_delegated_user:
+
+def resolve_gmail_auth_mode() -> str:
+    has_delegated_user = bool(resolve_delegated_user())
+
+    if has_delegated_user:
         return "service_account"
-    if has_token:
-        return "oauth_token"
-    if has_oauth_client:
-        return "oauth_client"
 
     raise RuntimeError(
-        "Gmail credentials are not configured. Use GOOGLE_SERVICE_ACCOUNT_* with GMAIL_DELEGATED_USER for "
-        "Workspace domain-wide delegation, or configure GOOGLE_OAUTH_CLIENT_SECRET_* and optionally GMAIL_TOKEN_* "
-        "for a standard Gmail OAuth flow."
+        "Gmail requires Google Workspace domain-wide delegation. "
+        "Provide GOOGLE_DELEGATED_USER or GMAIL_DELEGATED_USER and authenticate either with "
+        "Application Default Credentials or service-account credentials."
     )
 
 
 def load_gmail_credentials():
-    auth_mode = resolve_gmail_auth_mode()
-
-    if auth_mode == "service_account":
-        from google.oauth2.service_account import Credentials as ServiceAccountCredentials
-
-        delegated_user = os.environ["GMAIL_DELEGATED_USER"]
-        credentials_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-        credentials_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
-
-        if credentials_json:
-            credentials = ServiceAccountCredentials.from_service_account_info(
-                json.loads(credentials_json),
-                scopes=GMAIL_READONLY_SCOPES,
-            )
-        else:
-            credentials = ServiceAccountCredentials.from_service_account_file(
-                credentials_file,
-                scopes=GMAIL_READONLY_SCOPES,
-            )
-
-        return credentials.with_subject(delegated_user)
-
-    if auth_mode == "oauth_token":
-        from google.auth.transport.requests import Request
-        from google.oauth2.credentials import Credentials as UserCredentials
-
-        token_json = os.getenv("GMAIL_TOKEN_JSON")
-        token_file = os.getenv("GMAIL_TOKEN_FILE")
-
-        if token_json:
-            credentials = UserCredentials.from_authorized_user_info(json.loads(token_json), GMAIL_READONLY_SCOPES)
-        else:
-            credentials = UserCredentials.from_authorized_user_file(token_file, GMAIL_READONLY_SCOPES)
-
-        if credentials.expired and credentials.refresh_token:
-            credentials.refresh(Request())
-            if token_file:
-                with open(token_file, "w", encoding="utf-8") as handle:
-                    handle.write(credentials.to_json())
-
-        return credentials
-
-    from google_auth_oauthlib.flow import InstalledAppFlow
-
-    client_secret_json = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET_JSON")
-    client_secret_file = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET_FILE")
-    token_file = os.getenv("GMAIL_TOKEN_FILE", ".gmail_token.json")
-    use_console = os.getenv("GMAIL_OAUTH_USE_CONSOLE", "").lower() in {"1", "true", "yes"}
-
-    if client_secret_json:
-        flow = InstalledAppFlow.from_client_config(json.loads(client_secret_json), GMAIL_READONLY_SCOPES)
-    else:
-        flow = InstalledAppFlow.from_client_secrets_file(client_secret_file, GMAIL_READONLY_SCOPES)
-
-    credentials = cast(Any, flow).run_console() if use_console else flow.run_local_server(port=0)
-    with open(token_file, "w", encoding="utf-8") as handle:
-        handle.write(credentials.to_json())
-    return credentials
+    resolve_gmail_auth_mode()
+    delegated_user = resolve_delegated_user()
+    if not delegated_user:
+        raise RuntimeError("A delegated Google Workspace user is required for Gmail access.")
+    return load_google_credentials(
+        scopes=GMAIL_READONLY_SCOPES,
+        delegated_user=delegated_user,
+        missing_credentials_message=(
+            "Gmail credentials are not configured. "
+            "Use Application Default Credentials or set GOOGLE_SERVICE_ACCOUNT_FILE, "
+            "GOOGLE_APPLICATION_CREDENTIALS, or GOOGLE_SERVICE_ACCOUNT_JSON."
+        ),
+    )
 
 
 def build_gmail_service():
-    from googleapiclient.discovery import build
+    import googleapiclient.discovery as google_discovery_module
 
     credentials = load_gmail_credentials()
+    build = cast(Any, google_discovery_module).build
     return build("gmail", "v1", credentials=credentials, cache_discovery=False)
 
 

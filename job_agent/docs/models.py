@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field
+import pydantic as pydantic_module
+
+BaseModel = cast(Any, pydantic_module).BaseModel
+Field = cast(Any, pydantic_module).Field
 
 DocumentationEventType = Literal[
     "agent_graph_changed",
