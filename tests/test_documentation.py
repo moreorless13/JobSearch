@@ -192,6 +192,49 @@ def test_documentation_service_is_idempotent_when_nothing_changes(tmp_path: Path
     assert len(store.documentation_events) == 0
 
 
+def test_documentation_service_appends_changelog_entries(tmp_path: Path) -> None:
+    docs_service = load_docs_service()
+    store = FakeStateStore()
+    prompts_dir = tmp_path / "prompts"
+    schemas_dir = tmp_path / "schemas"
+    write_surface_files(prompts_dir, schemas_dir, prompt_body="baseline prompt", schema_body='{"type":"object"}')
+
+    service = docs_service.DocumentationService(
+        candidate_profile=PROFILE,
+        state_store=store,
+        strategy_snapshot=build_default_strategy_snapshot(PROFILE),
+        root_dir=tmp_path,
+        prompts_dir=prompts_dir,
+        schemas_dir=schemas_dir,
+    )
+    service.refresh(workflow="jobs")
+    changelog_path = tmp_path / "docs" / "changelog" / "CHANGELOG.md"
+    changelog_path.write_text(
+        "# Changelog\n\nCurrent behavior version: `1.0.0`\n\n## 2026-01-01\n\n- Existing behavior change.\n",
+        encoding="utf-8",
+    )
+
+    updated_profile = {
+        **PROFILE,
+        "decision_thresholds": {**PROFILE["decision_thresholds"], "track": 75},
+    }
+    service = docs_service.DocumentationService(
+        candidate_profile=updated_profile,
+        state_store=store,
+        strategy_snapshot=build_default_strategy_snapshot(updated_profile),
+        root_dir=tmp_path,
+        prompts_dir=prompts_dir,
+        schemas_dir=schemas_dir,
+    )
+    service.refresh(workflow="jobs")
+
+    content = changelog_path.read_text(encoding="utf-8")
+
+    assert "Current behavior version: `1.1.0`" in content
+    assert "Existing behavior change." in content
+    assert content.index("Existing behavior change.") < content.index("Updated job decision policy")
+
+
 def test_explain_service_answers_change_and_rejection_questions(tmp_path: Path) -> None:
     docs_service = load_docs_service()
     store = FakeStateStore()

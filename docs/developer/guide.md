@@ -1,6 +1,6 @@
 # Developer Guide
 
-Current behavior version: `1.0.0`
+Current behavior version: `1.1.0`
 
 Add behavior changes in code, then let the documentation service capture the new manifest and render guides.
 
@@ -10,6 +10,7 @@ Add behavior changes in code, then let the documentation service capture the new
 - Major versions are reserved for workflow removals or output contract changes.
 - Minor versions cover new or changed behavior.
 - Patch versions cover documentation-only refreshes.
+- Changelog refreshes preserve existing entries and append new behavior changes at the end.
 
 ## Working Surface
 

@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any, cast
@@ -170,12 +171,14 @@ class DocumentationService:
             )
 
         history_events = self.state_store.list_documentation_events()
+        existing_changelog_content = self._read_existing_artifact("changelog/CHANGELOG.md")
         rendered = self._render_artifacts(
             manifest=current_manifest,
             behavior_version=version,
             version_records=version_records,
             history_events=[*history_events, *events],
             current_events=events,
+            existing_changelog_content=existing_changelog_content,
         )
 
         if previous_manifest is not None and not events and self._has_doc_only_changes(rendered, previous_state):
@@ -194,6 +197,7 @@ class DocumentationService:
                 version_records=version_records,
                 history_events=history_events,
                 current_events=[],
+                existing_changelog_content=existing_changelog_content,
             )
 
         for event in events:
@@ -377,6 +381,12 @@ class DocumentationService:
             }
         return manifest
 
+    def _read_existing_artifact(self, relative_path: str) -> str | None:
+        artifact_path = self.docs_dir / relative_path
+        if not artifact_path.exists():
+            return None
+        return artifact_path.read_text(encoding="utf-8")
+
     def _tool_name(self, tool: Any) -> str:
         return getattr(tool, "name", getattr(tool, "__name__", tool.__class__.__name__))
 
@@ -491,12 +501,17 @@ class DocumentationService:
         version_records: list[BehaviorVersionRecord],
         history_events: list[DocumentationEvent],
         current_events: list[DocumentationEvent],
+        existing_changelog_content: str | None = None,
     ) -> dict[str, str]:
         return {
             "architecture/overview.md": self._render_architecture(manifest, behavior_version),
             "operations/guide.md": self._render_operations(manifest, behavior_version),
             "developer/guide.md": self._render_developer(manifest, behavior_version),
-            "changelog/CHANGELOG.md": self._render_changelog(history_events, behavior_version),
+            "changelog/CHANGELOG.md": self._render_changelog(
+                current_events if existing_changelog_content else history_events,
+                behavior_version,
+                existing_content=existing_changelog_content,
+            ),
             "decisions/behavior_versions.md": self._render_behavior_versions(version_records, behavior_version, current_events),
         }
 
@@ -577,22 +592,47 @@ class DocumentationService:
             "- The explain path is available through `python app.py --explain \"<question>\"`.\n"
         )
 
-    def _render_changelog(self, events: list[DocumentationEvent], behavior_version: str) -> str:
+    def _render_changelog(
+        self,
+        events: list[DocumentationEvent],
+        behavior_version: str,
+        *,
+        existing_content: str | None = None,
+    ) -> str:
+        appended_body = self._render_changelog_events(events)
+        if existing_content:
+            content = self._update_changelog_version(existing_content, behavior_version)
+            if not events:
+                return content if content.endswith("\n") else f"{content}\n"
+            if "- No documented behavior changes yet." in content and content.count("## ") == 0:
+                return f"# Changelog\n\nCurrent behavior version: `{behavior_version}`\n\n{appended_body}\n"
+            return f"{content.rstrip()}\n\n{appended_body}\n"
+
         if not events:
-            body = "- No documented behavior changes yet."
-        else:
-            grouped: dict[str, list[DocumentationEvent]] = {}
-            for event in events:
-                grouped.setdefault(event.timestamp[:10], []).append(event)
-            sections = []
-            for day in sorted(grouped, reverse=True):
-                lines = "\n".join(
-                    f"- {event.summary} (`{event.event_type}`)"
-                    for event in grouped[day]
-                )
-                sections.append(f"## {day}\n\n{lines}")
-            body = "\n\n".join(sections)
-        return f"# Changelog\n\nCurrent behavior version: `{behavior_version}`\n\n{body}\n"
+            appended_body = "- No documented behavior changes yet."
+        return f"# Changelog\n\nCurrent behavior version: `{behavior_version}`\n\n{appended_body}\n"
+
+    def _render_changelog_events(self, events: list[DocumentationEvent]) -> str:
+        if not events:
+            return ""
+        grouped: dict[str, list[DocumentationEvent]] = {}
+        for event in events:
+            grouped.setdefault(event.timestamp[:10], []).append(event)
+        sections = []
+        for day in sorted(grouped):
+            lines = "\n".join(
+                f"- {event.summary} (`{event.event_type}`)"
+                for event in grouped[day]
+            )
+            sections.append(f"## {day}\n\n{lines}")
+        return "\n\n".join(sections)
+
+    def _update_changelog_version(self, content: str, behavior_version: str) -> str:
+        pattern = r"Current behavior version: `[^`]+`"
+        replacement = f"Current behavior version: `{behavior_version}`"
+        if re.search(pattern, content):
+            return re.sub(pattern, replacement, content, count=1)
+        return f"# Changelog\n\n{replacement}\n\n{content.lstrip()}"
 
     def _render_behavior_versions(
         self,
