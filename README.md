@@ -10,7 +10,7 @@ The OpenAI Agents SDK is imported as `agents`. A top-level local `agents/` direc
 
 - `app.py`: runnable entrypoint for the coordinator workflow
 - `job_agent/agents/`: coordinator and specialist agent builders
-- `job_agent/resume.py`: versioned resume-reference normalization and tailored resume artifact generation
+- `job_agent/resume.py`: versioned resume-reference normalization and tailored resume/cover-letter artifact generation
 - `job_agent/tools/`: job search, Sheets integration, Gmail integration, and helper logic
 - `schemas/`: candidate profile and JSON schemas
 - `prompts/`: prompt files for each agent
@@ -35,7 +35,7 @@ Implemented today:
 - Free-form runs automatically answer coordinator follow-up questions with `yes` until the coordinator proceeds or a safety limit is reached
 - Search retries once when the first filtered pass returns no jobs
 - Tracker sync only writes jobs that clear deterministic decision thresholds
-- Jobs that trigger resume tailoring and have configured `resume_reference_documents` can generate versioned resume drafts under `output/doc/resumes/` and store the generated `resume_version` on the tracker row
+- Jobs added to the tracker and configured with `resume_reference_documents` generate versioned resume drafts under `output/doc/resumes/`, cover letters under `output/doc/cover_letters/`, and store both generated versions on the tracker row
 - Local helper logic for dedupe, location filtering, fit scoring, and email classification is implemented and tested
 
 Still incomplete:
@@ -67,7 +67,8 @@ Optional `.env` values:
 - `REDIS_URL` enables Redis-backed orchestration state. Example: `redis://localhost:6379/0`
 - `GMAIL_SEARCH_MAX_RESULTS` defaults to `25`
 - `RESUME_TEMPLATE_DOCX_PATH` points to the Word resume template used when generating formatted DOCX and Google Doc resumes
-- `RESUME_GOOGLE_DRIVE_FOLDER_ID` or `RESUME_GOOGLE_DRIVE_FOLDER_URL` publishes generated resume Google Docs into a specific Drive folder
+- `COVER_LETTER_TEMPLATE_DOCX_PATH` points to a sample cover letter used for cover letter DOCX formatting and writing-style reference
+- `RESUME_GOOGLE_DRIVE_FOLDER_ID` or `RESUME_GOOGLE_DRIVE_FOLDER_URL` publishes generated resume and cover letter Google Docs into a specific Drive folder
 - `RESUME_GOOGLE_DRIVE_USE_DELEGATION=false` forces Drive publishing to use the service account directly, useful when the destination folder is shared with the service account
 - `RESUME_GOOGLE_DRIVE_DELEGATED_USER` overrides `GOOGLE_DELEGATED_USER` for Drive publishing only
 - `GOOGLE_SERVICE_ACCOUNT_EMAIL` for keyless delegated auth when the service account email cannot be detected from ADC automatically
@@ -120,7 +121,7 @@ GOOGLE_SERVICE_ACCOUNT_EMAIL=YOUR_SERVICE_ACCOUNT@PROJECT_ID.iam.gserviceaccount
 
 `GOOGLE_DELEGATED_USER` must be a real Workspace mailbox, not the service account email. Without impersonation, Sheets can still work locally, but Gmail will not.
 
-The candidate profile is loaded from `schemas/candidate_profile.json`. `JOB_TRACKER_SHEET_URL` from `.env` overrides the sheet URL in that file at runtime. The candidate profile now also supports `top_level_objective`, `company_priorities`, `decision_thresholds`, `resume_template_document_path`, `resume_google_drive_folder_id`, `resume_google_drive_folder_url`, and versioned `resume_reference_documents` for resume-writing flows.
+The candidate profile is loaded from `schemas/candidate_profile.json`. `JOB_TRACKER_SHEET_URL` from `.env` overrides the sheet URL in that file at runtime. The candidate profile now also supports `top_level_objective`, `company_priorities`, `decision_thresholds`, `resume_template_document_path`, `cover_letter_template_document_path`, `resume_google_drive_folder_id`, `resume_google_drive_folder_url`, and versioned `resume_reference_documents` for resume-writing flows.
 
 Example reference entry:
 
@@ -146,8 +147,11 @@ python app.py --workflow jobs
 python app.py --workflow daily
 python app.py --workflow gmail
 python app.py --workflow reflect
+python app.py --workflow backfill-materials
 python app.py --input "Search for new matching jobs and update my tracker."
 ```
+
+Use `backfill-materials` for the one-off tracker pass that generates a fresh tailored resume and cover letter for existing tracker rows. `backfill-resumes` and `backfill-cover-letters` run each side independently.
 
 Free-form `--input` runs use the coordinator agent. Today, if the coordinator asks a follow-up question, the app automatically replies `yes` and continues until no follow-up questions remain or the loop limit is hit. That behavior is intentional in the current CLI flow, but it is still blunt enough to deserve supervision instead of blind trust.
 
@@ -164,7 +168,7 @@ Recommended deployment order:
 5. Build and push the container image with `gcloud builds submit`.
 6. Provision Memorystore for Redis if you want Redis-backed orchestration state. Otherwise omit `REDIS_URL` and the app will run in degraded stateless mode.
 7. Attach the correct service account to the Cloud Run Job and grant it `Service Account Token Creator` on the delegated target account if required for your impersonation setup.
-8. Create a Cloud Run Job that sets `JOB_TRACKER_SHEET_URL`, `GOOGLE_DELEGATED_USER`, and any optional `REDIS_URL`. Set `RESUME_GOOGLE_DRIVE_FOLDER_ID` when resume Google Docs should be published to Drive. Set `GOOGLE_SERVICE_ACCOUNT_EMAIL` if the runtime cannot infer it automatically.
+8. Create a Cloud Run Job that sets `JOB_TRACKER_SHEET_URL`, `GOOGLE_DELEGATED_USER`, and any optional `REDIS_URL`. Set `RESUME_GOOGLE_DRIVE_FOLDER_ID` when resume and cover letter Google Docs should be published to Drive. Set `GOOGLE_SERVICE_ACCOUNT_EMAIL` if the runtime cannot infer it automatically.
 9. Execute the job and inspect the first execution logs before scheduling it.
 
 Typical production env for the Cloud Run Job:
@@ -192,6 +196,7 @@ All runs print a JSON payload with this top-level shape:
   "new_jobs": [],
   "gmail_updates": [],
   "resume_artifacts": [],
+  "cover_letter_artifacts": [],
   "tracker_updates": [],
   "qa_results": [],
   "documentation_updates": [],
@@ -203,13 +208,15 @@ All runs print a JSON payload with this top-level shape:
 
 `jobs` and `daily` workflows will write to Google Sheets when qualifying jobs are found. `reflect` updates Redis strategy state only and preserves the existing top-level output contract.
 
-## Resume Tailoring
+## Application Materials
 
-- Resume drafts are generated only when the tracker decision resolves to `tailor_resume = yes`.
-- Generated drafts are versioned as `v1.0`, `v1.1`, and so on, and written under `output/doc/resumes/`.
-- When `resume_template_document_path` or `RESUME_TEMPLATE_DOCX_PATH` is configured, the generator also writes a formatted DOCX using that file as the Word template.
-- When `resume_google_drive_folder_id`, `resume_google_drive_folder_url`, `RESUME_GOOGLE_DRIVE_FOLDER_ID`, or `RESUME_GOOGLE_DRIVE_FOLDER_URL` is configured, the DOCX is uploaded to Drive and converted into a Google Doc in that folder.
-- The generated artifact version is also stored in the tracker row as `resume_version`.
+- Resume and cover letter drafts are generated for every job found and added to the tracker.
+- Generated resume drafts are versioned as `v1.0`, `v1.1`, and so on, and written under `output/doc/resumes/`.
+- Generated cover letters are versioned the same way and written under `output/doc/cover_letters/` as Markdown and DOCX.
+- When `resume_template_document_path` or `RESUME_TEMPLATE_DOCX_PATH` is configured, resume generation writes a formatted DOCX using that file as the Word template.
+- When `cover_letter_template_document_path` or `COVER_LETTER_TEMPLATE_DOCX_PATH` is configured, cover letter generation uses that document for DOCX formatting and writing-style reference.
+- When `resume_google_drive_folder_id`, `resume_google_drive_folder_url`, `RESUME_GOOGLE_DRIVE_FOLDER_ID`, or `RESUME_GOOGLE_DRIVE_FOLDER_URL` is configured, resume and cover letter DOCX files are uploaded to Drive and converted into Google Docs in that folder.
+- The generated artifact versions are stored in the tracker row as `resume_version` and `cover_letter_version`.
 - Reference resumes should be explicitly labeled with their version number in `resume_reference_documents`.
 
 ## Test
@@ -225,7 +232,7 @@ All runs print a JSON payload with this top-level shape:
 - Tracker rows are matched primarily by `duplicate_key`, then by posting URL and company/title/location.
 - Existing tracker notes are preserved and new notes are appended.
 - When Redis is configured, the orchestrator stores decisions, outcomes, reflection summaries, and follow-up tasks there. Google Sheets remains the human-readable mirror, not the strategy source of truth.
-- Resume drafts generated under `output/doc/resumes/` are local artifacts unless Drive publishing is configured.
+- Resume drafts generated under `output/doc/resumes/` and cover letters generated under `output/doc/cover_letters/` are local artifacts unless Drive publishing is configured.
 - Cloud Run production deployments should prefer ADC plus `GOOGLE_DELEGATED_USER`, not mounted long-lived keys.
 - `GOOGLE_SERVICE_ACCOUNT_EMAIL` exists for the annoying cases where ADC knows who it is but refuses to say it out loud.
 

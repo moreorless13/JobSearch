@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import pydantic as pydantic_module
 
-from job_agent.models import ResumeArtifact
+from job_agent.models import CoverLetterArtifact, ResumeArtifact
 from job_agent.tools.dedupe import normalize_text
 
 BaseModel = cast(Any, pydantic_module).BaseModel
@@ -79,6 +79,17 @@ class ResumeDraft(BaseModel):
     core_skills: list[str] = Field(default_factory=list)
     experience: list[ResumeExperienceEntry] = Field(default_factory=list)
     education: list[str] = Field(default_factory=list)
+
+
+class CoverLetterDraft(BaseModel):
+    full_name: str
+    target_role: str
+    company: str | None = None
+    greeting: str | None = None
+    opening: str
+    body_paragraphs: list[str] = Field(default_factory=list)
+    closing: str
+    signature: str | None = None
 
 
 def versioned_label(label: str, version: str) -> str:
@@ -216,6 +227,10 @@ def next_generated_resume_version(output_dir: Path, *, company: str | None, role
     return f"v{major}.{minor + 1}"
 
 
+def next_generated_cover_letter_version(output_dir: Path, *, company: str | None, role_title: str | None) -> str:
+    return next_generated_resume_version(output_dir, company=company, role_title=role_title)
+
+
 def render_resume_markdown(
     draft: ResumeDraft,
     *,
@@ -261,6 +276,63 @@ def render_resume_markdown(
         lines.append("")
 
     return "\n".join(lines).strip() + "\n"
+
+
+def render_cover_letter_markdown(
+    draft: CoverLetterDraft,
+    *,
+    version: str,
+    company: str | None,
+    source_labels: list[str],
+) -> str:
+    lines = [
+        f"# {draft.full_name}",
+        f"Target Role: {draft.target_role}",
+        f"Version: {version}",
+    ]
+    tailored_for = company or draft.company
+    if tailored_for:
+        lines.append(f"Tailored For: {tailored_for}")
+    if source_labels:
+        lines.append(f"Reference Set: {', '.join(source_labels)}")
+
+    lines.append("")
+    if draft.greeting:
+        lines.extend([draft.greeting, ""])
+    lines.extend([draft.opening, ""])
+    for paragraph in draft.body_paragraphs:
+        if paragraph.strip():
+            lines.extend([paragraph, ""])
+    lines.append(draft.closing)
+    signature = draft.signature or draft.full_name
+    if signature:
+        lines.extend(["", signature])
+    return "\n".join(lines).strip() + "\n"
+
+
+def cover_letter_template_path(candidate_profile: dict[str, Any]) -> Path | None:
+    configured_template = str(candidate_profile.get("cover_letter_template_document_path") or "").strip()
+    return Path(configured_template) if configured_template else None
+
+
+def build_cover_letter_style_reference_packet(candidate_profile: dict[str, Any]) -> dict[str, Any] | None:
+    template_path = cover_letter_template_path(candidate_profile)
+    if template_path is None:
+        return None
+    extracted_text = extract_reference_document_text(str(template_path))
+    return {
+        "label": "Cover Letter Style Reference",
+        "version": DEFAULT_REFERENCE_VERSION,
+        "kind": "cover_letter_style",
+        "target_focus": "cover letter style and structure",
+        "path": str(template_path),
+        "notes": [
+            "Use this document for cover letter tone, structure, paragraph flow, and formatting cues.",
+            "Do not use it as evidence for target-job facts unless the same facts appear in the target job.",
+        ],
+        "content_available": extracted_text is not None,
+        "content": (extracted_text or "").strip()[:12000] or None,
+    }
 
 
 def w_tag(name: str) -> str:
@@ -402,6 +474,56 @@ def _make_paragraph(
     return paragraph
 
 
+def _new_docx_root() -> ET.Element:
+    root = ET.Element(w_tag("document"))
+    ET.SubElement(root, w_tag("body"))
+    return root
+
+
+def _minimal_content_types_xml() -> str:
+    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>
+"""
+
+
+def _minimal_package_rels_xml() -> str:
+    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>
+"""
+
+
+def _write_docx_archive(
+    *,
+    root: ET.Element,
+    output_path: Path,
+    source_archive: zipfile.ZipFile | None = None,
+) -> None:
+    rendered_document_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as output_archive:
+        if source_archive is None:
+            output_archive.writestr("[Content_Types].xml", _minimal_content_types_xml())
+            output_archive.writestr("_rels/.rels", _minimal_package_rels_xml())
+            output_archive.writestr("word/document.xml", rendered_document_xml)
+            return
+
+        wrote_document = False
+        for item in source_archive.infolist():
+            if item.filename == "word/document.xml":
+                output_archive.writestr(item, rendered_document_xml)
+                wrote_document = True
+                continue
+            output_archive.writestr(item, source_archive.read(item.filename))
+        if not wrote_document:
+            output_archive.writestr("word/document.xml", rendered_document_xml)
+
+
 def render_resume_docx(
     *,
     draft: ResumeDraft,
@@ -486,14 +608,133 @@ def render_resume_docx(
         if section_properties is not None:
             body.append(section_properties)
 
-        rendered_document_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as output_archive:
-            for item in source_archive.infolist():
-                if item.filename == "word/document.xml":
-                    output_archive.writestr(item, rendered_document_xml)
-                    continue
-                output_archive.writestr(item, source_archive.read(item.filename))
+        _write_docx_archive(root=root, output_path=output_path, source_archive=source_archive)
+
+
+def _first_paragraph_properties_by_text_length(paragraphs: list[ET.Element], *, min_words: int = 6) -> tuple[ET.Element | None, ET.Element | None]:
+    for paragraph in paragraphs:
+        text = _paragraph_text(paragraph)
+        if len(text.split()) >= min_words:
+            return _paragraph_properties(paragraph), _first_run_properties(paragraph)
+    return None, None
+
+
+def _empty_paragraph_properties(paragraphs: list[ET.Element]) -> ET.Element | None:
+    for paragraph in paragraphs:
+        if not _paragraph_text(paragraph):
+            return _paragraph_properties(paragraph)
+    return None
+
+
+def _template_contact_paragraphs(paragraphs: list[ET.Element]) -> list[ET.Element]:
+    contact_paragraphs: list[ET.Element] = []
+    for paragraph in paragraphs:
+        if _paragraph_text(paragraph).lower() == "hiring team":
+            return contact_paragraphs
+        contact_paragraphs.append(deepcopy(paragraph))
+    return []
+
+
+def _candidate_contact_paragraphs(
+    *,
+    draft: CoverLetterDraft,
+    candidate_profile: dict[str, Any],
+    paragraph_properties: ET.Element | None,
+    run_properties: ET.Element | None,
+) -> list[ET.Element]:
+    values = [
+        draft.full_name,
+        str(candidate_profile.get("home_base") or candidate_profile.get("location") or "").strip(),
+        str(candidate_profile.get("phone") or candidate_profile.get("phone_number") or "").strip(),
+        str(candidate_profile.get("email") or candidate_profile.get("contact_email") or "").strip(),
+    ]
+    return [
+        _make_paragraph(value, paragraph_properties=paragraph_properties, run_properties=run_properties)
+        for value in values
+        if value
+    ]
+
+
+def render_cover_letter_docx(
+    *,
+    draft: CoverLetterDraft,
+    version: str,
+    company: str | None,
+    source_labels: list[str],
+    candidate_profile: dict[str, Any],
+    template_path: Path | None,
+    output_path: Path,
+) -> None:
+    source_archive: zipfile.ZipFile | None = None
+    try:
+        if template_path is not None and template_path.exists():
+            source_archive = zipfile.ZipFile(template_path)
+            root = ET.fromstring(source_archive.read("word/document.xml"))
+        else:
+            root = _new_docx_root()
+
+        body = root.find(w_tag("body"))
+        if body is None:
+            raise ValueError("Cover letter DOCX template does not contain a Word document body.")
+
+        paragraphs = [paragraph for paragraph in body.findall(w_tag("p"))]
+        section_properties = body.find(w_tag("sectPr"))
+        contact_p_pr, contact_r_pr = (
+            (_paragraph_properties(paragraphs[0]), _first_run_properties(paragraphs[0]))
+            if paragraphs
+            else (None, None)
+        )
+        body_p_pr, body_r_pr = _first_paragraph_properties_by_text_length(paragraphs)
+        body_p_pr = _clone_or_fallback(body_p_pr)
+        body_r_pr = _clone_or_fallback(body_r_pr)
+        blank_p_pr = _empty_paragraph_properties(paragraphs)
+        signature_p_pr = _paragraph_properties(paragraphs[-2]) if len(paragraphs) >= 2 else body_p_pr
+        signature_r_pr = _clone_or_fallback(_first_run_properties(paragraphs[-2]) if len(paragraphs) >= 2 else None, _bold_run_properties())
+
+        for child in list(body):
+            body.remove(child)
+
+        contact_paragraphs = _template_contact_paragraphs(paragraphs) if source_archive is not None else []
+        if not contact_paragraphs:
+            contact_paragraphs = _candidate_contact_paragraphs(
+                draft=draft,
+                candidate_profile=candidate_profile,
+                paragraph_properties=contact_p_pr,
+                run_properties=contact_r_pr,
+            )
+            if blank_p_pr is not None:
+                contact_paragraphs.append(_make_paragraph("", paragraph_properties=blank_p_pr, run_properties=contact_r_pr))
+        for paragraph in contact_paragraphs:
+            body.append(paragraph)
+
+        recipient_company = company or draft.company
+        body.append(_make_paragraph("Hiring Team", paragraph_properties=contact_p_pr, run_properties=contact_r_pr))
+        if recipient_company:
+            body.append(_make_paragraph(recipient_company, paragraph_properties=contact_p_pr, run_properties=contact_r_pr))
+        if blank_p_pr is not None:
+            body.append(_make_paragraph("", paragraph_properties=blank_p_pr, run_properties=contact_r_pr))
+
+        body.append(_make_paragraph(draft.greeting or "Dear Hiring Team,", paragraph_properties=contact_p_pr, run_properties=contact_r_pr))
+        body.append(_make_paragraph(draft.opening, paragraph_properties=body_p_pr, run_properties=body_r_pr))
+        for paragraph_text in draft.body_paragraphs:
+            if paragraph_text.strip():
+                body.append(_make_paragraph(paragraph_text, paragraph_properties=body_p_pr, run_properties=body_r_pr))
+        body.append(_make_paragraph(draft.closing, paragraph_properties=body_p_pr, run_properties=body_r_pr))
+        body.append(_make_paragraph("Sincerely,", paragraph_properties=body_p_pr, run_properties=body_r_pr))
+        body.append(
+            _make_paragraph(
+                draft.signature or draft.full_name,
+                paragraph_properties=signature_p_pr,
+                run_properties=signature_r_pr,
+            )
+        )
+
+        if section_properties is not None:
+            body.append(section_properties)
+        _write_docx_archive(root=root, output_path=output_path, source_archive=source_archive)
+    finally:
+        if source_archive is not None:
+            source_archive.close()
 
 
 def resolve_resume_template_path(candidate_profile: dict[str, Any]) -> Path | None:
@@ -521,6 +762,36 @@ def publish_resume_google_doc(
     folder_url = str(candidate_profile.get("resume_google_drive_folder_url") or "").strip() or None
     if not folder_id and not folder_url:
         artifact.google_doc_error = "Resume Google Doc publishing is not configured with a Drive folder ID or URL."
+        return artifact
+
+    from job_agent.tools.drive import upload_docx_as_google_doc_impl
+
+    result = upload_docx_as_google_doc_impl(
+        docx_path=artifact.docx_path,
+        name=google_doc_name,
+        folder_id=folder_id,
+        folder_url=folder_url,
+    )
+    if result.get("implemented"):
+        artifact.google_doc_id = result.get("google_doc_id")
+        artifact.google_doc_url = result.get("google_doc_url")
+    else:
+        artifact.google_doc_error = str(result.get("reason") or "Google Docs publishing failed.")
+    return artifact
+
+
+def publish_cover_letter_google_doc(
+    *,
+    artifact: CoverLetterArtifact,
+    candidate_profile: dict[str, Any],
+    google_doc_name: str,
+) -> CoverLetterArtifact:
+    if not artifact.docx_path:
+        return artifact
+    folder_id = str(candidate_profile.get("resume_google_drive_folder_id") or "").strip() or None
+    folder_url = str(candidate_profile.get("resume_google_drive_folder_url") or "").strip() or None
+    if not folder_id and not folder_url:
+        artifact.google_doc_error = "Cover letter Google Doc publishing is not configured with a Drive folder ID or URL."
         return artifact
 
     from job_agent.tools.drive import upload_docx_as_google_doc_impl
@@ -592,6 +863,51 @@ def write_resume_artifact(
     )
 
 
+def write_cover_letter_artifact(
+    *,
+    draft: CoverLetterDraft,
+    company: str | None,
+    role_title: str | None,
+    source_labels: list[str],
+    candidate_profile: dict[str, Any],
+    template_path: Path | None = None,
+    root_dir: Path | None = None,
+) -> CoverLetterArtifact:
+    output_dir = (root_dir or ROOT_DIR) / "output" / "doc" / "cover_letters"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    version = next_generated_cover_letter_version(output_dir, company=company, role_title=role_title)
+    artifact_slug = build_resume_artifact_slug(company=company, role_title=role_title)
+    artifact_path = output_dir / f"{artifact_slug}__{version}.md"
+    docx_path = output_dir / f"{artifact_slug}__{version}.docx"
+    artifact_path.write_text(
+        render_cover_letter_markdown(
+            draft,
+            version=version,
+            company=company,
+            source_labels=source_labels,
+        ),
+        encoding="utf-8",
+    )
+    render_cover_letter_docx(
+        draft=draft,
+        version=version,
+        company=company,
+        source_labels=source_labels,
+        candidate_profile=candidate_profile,
+        template_path=template_path,
+        output_path=docx_path,
+    )
+    return CoverLetterArtifact(
+        company=company,
+        role_title=role_title,
+        version=version,
+        output_path=str(artifact_path),
+        format="markdown+docx",
+        docx_path=str(docx_path),
+        source_labels=source_labels,
+    )
+
+
 def validate_resume_draft(raw_output: Any) -> ResumeDraft:
     if isinstance(raw_output, ResumeDraft):
         return raw_output
@@ -602,6 +918,18 @@ def validate_resume_draft(raw_output: Any) -> ResumeDraft:
     if isinstance(raw_output, str):
         return ResumeDraft.model_validate(json.loads(raw_output))
     raise TypeError("Resume writer returned an unexpected payload.")
+
+
+def validate_cover_letter_draft(raw_output: Any) -> CoverLetterDraft:
+    if isinstance(raw_output, CoverLetterDraft):
+        return raw_output
+    if hasattr(raw_output, "model_dump"):
+        raw_output = raw_output.model_dump()
+    if isinstance(raw_output, dict):
+        return CoverLetterDraft.model_validate(raw_output)
+    if isinstance(raw_output, str):
+        return CoverLetterDraft.model_validate(json.loads(raw_output))
+    raise TypeError("Cover letter writer returned an unexpected payload.")
 
 
 def generate_resume_artifact_impl(
@@ -661,6 +989,79 @@ def generate_resume_artifact_impl(
         if part
     )
     artifact = publish_resume_google_doc(
+        artifact=artifact,
+        candidate_profile=candidate_profile,
+        google_doc_name=google_doc_name,
+    )
+    return {
+        "implemented": True,
+        "artifact": artifact.model_dump(),
+    }
+
+
+def generate_cover_letter_artifact_impl(
+    *,
+    candidate_profile: dict[str, Any],
+    job: dict[str, Any],
+    runner_cls: Any | None = None,
+    root_dir: Path | None = None,
+) -> dict[str, Any]:
+    reference_documents = build_resume_reference_packets(candidate_profile)
+    style_reference = build_cover_letter_style_reference_packet(candidate_profile)
+    cover_letter_documents = [*reference_documents]
+    if style_reference is not None:
+        cover_letter_documents.append(style_reference)
+
+    if not cover_letter_documents:
+        return {
+            "implemented": False,
+            "reason": "No resume reference documents are configured for cover letter drafting.",
+        }
+
+    available_documents = [document for document in cover_letter_documents if document.get("content_available")]
+    if not available_documents:
+        return {
+            "implemented": False,
+            "reason": "Reference files are configured, but their contents could not be extracted.",
+        }
+
+    if runner_cls is None:
+        import agents as agents_module
+
+        runner_cls = cast(Any, agents_module).Runner
+
+    from job_agent.agents.cover_letter_writer import build_cover_letter_writer_agent
+
+    agent = build_cover_letter_writer_agent(
+        candidate_profile,
+        job=job,
+        reference_documents=cover_letter_documents,
+    )
+    result = runner_cls.run_sync(
+        agent,
+        "Draft a tailored cover letter for this opportunity using the reference documents and job details.",
+    )
+    draft = validate_cover_letter_draft(result.final_output)
+    template_path = cover_letter_template_path(candidate_profile)
+    artifact = write_cover_letter_artifact(
+        draft=draft,
+        company=job.get("company"),
+        role_title=job.get("role_title"),
+        source_labels=[document["label"] for document in cover_letter_documents],
+        candidate_profile=candidate_profile,
+        template_path=template_path,
+        root_dir=root_dir,
+    )
+    google_doc_name = " - ".join(
+        str(part)
+        for part in (
+            job.get("company"),
+            job.get("role_title"),
+            f"Cover Letter {artifact.version}",
+        )
+        if part
+    )
+    artifact = publish_cover_letter_google_doc(
         artifact=artifact,
         candidate_profile=candidate_profile,
         google_doc_name=google_doc_name,

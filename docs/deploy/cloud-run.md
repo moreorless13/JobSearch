@@ -1,6 +1,6 @@
 # Cloud Run Deployment
 
-This repository is currently a CLI application, not an HTTP server. That makes **Cloud Run Jobs** the correct Google Cloud target for preset workflows such as `daily`, `jobs`, `gmail`, and `reflect`.
+This repository is currently a CLI application, not an HTTP server. That makes **Cloud Run Jobs** the correct Google Cloud target for preset workflows such as `daily`, `jobs`, `gmail`, `reflect`, and the one-off material backfill workflows.
 
 If you want a request-driven API on Cloud Run services later, add an HTTP server layer first. In its current form, the container should run to completion and exit.
 
@@ -76,9 +76,10 @@ Notes:
 - Use `--args="--workflow","jobs"` for the job-search-only workflow.
 - Use `--args="--workflow","gmail"` for Gmail sync.
 - Use `--args="--workflow","reflect"` for strategy reflection.
+- Use `--args="--workflow","backfill-materials"` for a one-off tracker pass that generates resumes and cover letters for existing rows.
 - If you do not want Redis yet, omit `REDIS_URL` and the app will run in degraded stateless mode.
 - Do not set `GOOGLE_APPLICATION_CREDENTIALS` on Cloud Run for the recommended keyless path.
-- Tailored resume drafts written under `output/doc/resumes/` live on the job's ephemeral filesystem unless Drive publishing is configured.
+- Tailored resume drafts under `output/doc/resumes/` and cover letters under `output/doc/cover_letters/` live on the job's ephemeral filesystem unless Drive publishing is configured.
 
 ## Domain-Wide Delegation Notes
 
@@ -134,4 +135,4 @@ gcloud run jobs executions describe EXECUTION_NAME --region us-central1
 - Sheets can use the same delegated Workspace user as Gmail, but direct spreadsheet sharing with the service account still works as a fallback.
 - Redis requires a reachable managed endpoint; local Homebrew Redis is only for local development.
 - Keyless ADC is now the preferred Cloud Run auth path; mounted service-account keys are only a fallback.
-- Generated resume artifacts are local files unless `RESUME_GOOGLE_DRIVE_FOLDER_ID` or `RESUME_GOOGLE_DRIVE_FOLDER_URL` is configured for Drive publishing.
+- Generated resume and cover letter artifacts are local files unless `RESUME_GOOGLE_DRIVE_FOLDER_ID` or `RESUME_GOOGLE_DRIVE_FOLDER_URL` is configured for Drive publishing.

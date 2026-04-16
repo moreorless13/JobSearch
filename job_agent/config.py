@@ -16,6 +16,9 @@ DEFAULT_WORKFLOW_INPUTS = {
     "jobs": "Search for new matching jobs, update the tracker, and summarize changes.",
     "gmail": "Scan Gmail for job-related updates, sync the tracker, and summarize changes.",
     "reflect": "Review recent outcomes, update strategy weights, and summarize the changes.",
+    "backfill-resumes": "Generate tailored resumes for existing tracker rows and write resume versions back to the tracker.",
+    "backfill-cover-letters": "Generate cover letters for existing tracker rows and write cover letter versions back to the tracker.",
+    "backfill-materials": "Generate tailored resumes and cover letters for existing tracker rows and write versions back to the tracker.",
 }
 
 DEFAULT_TOP_LEVEL_OBJECTIVE = "maximize qualified interview probability within 30 days while respecting salary, location, and role constraints"
@@ -44,6 +47,10 @@ def load_candidate_profile() -> dict[str, Any]:
     resume_template_path = os.getenv("RESUME_TEMPLATE_DOCX_PATH")
     if resume_template_path:
         profile["resume_template_document_path"] = resume_template_path
+
+    cover_letter_template_path = os.getenv("COVER_LETTER_TEMPLATE_DOCX_PATH")
+    if cover_letter_template_path:
+        profile["cover_letter_template_document_path"] = cover_letter_template_path
 
     resume_drive_folder_id = os.getenv("RESUME_GOOGLE_DRIVE_FOLDER_ID")
     if resume_drive_folder_id:

@@ -532,7 +532,7 @@ class DocumentationService:
         return (
             "# Architecture Overview\n\n"
             f"Current behavior version: `{behavior_version}`\n\n"
-            "The system finds jobs, scores them, optionally drafts versioned tailored resumes, publishes formatted Google Doc copies when Drive is configured, scans Gmail for updates, syncs the tracker, and reflects on outcomes to adjust strategy.\n\n"
+            "The system finds jobs, scores them, drafts versioned tailored resumes and cover letters for tracked jobs, publishes formatted resume and cover letter Google Docs when Drive is configured, scans Gmail for updates, syncs the tracker, and reflects on outcomes to adjust strategy.\n\n"
             "## Workflows\n\n"
             f"{workflow_lines}\n\n"
             "## Agent Graph\n\n"
@@ -550,7 +550,7 @@ class DocumentationService:
         return (
             "# Operations Guide\n\n"
             f"Current behavior version: `{behavior_version}`\n\n"
-            "Run the preset workflows through `python app.py --workflow <daily|jobs|gmail|reflect>`.\n\n"
+            "Run the preset workflows through `python app.py --workflow <daily|jobs|gmail|reflect|backfill-materials>`.\n\n"
             "## Decision Rules\n\n"
             f"- Salary floor: `{decision_policy.get('salary_floor')}`\n"
             f"- Thresholds: `{decision_policy.get('thresholds')}`\n"
@@ -561,14 +561,18 @@ class DocumentationService:
             f"- Flag threshold: `{qa_policy.get('flag_threshold')}`\n"
             f"- LLM judge enabled: `{qa_policy.get('llm_judge_enabled')}`\n"
             f"- Duplicate company cooldown: `{qa_policy.get('duplicate_company_cooldown_days')}` days\n\n"
-            "## Resume Tailoring\n\n"
-            "- Jobs marked `tailor_resume = yes` can generate versioned resume drafts during the `jobs` workflow.\n"
-            "- Drafts are written under `output/doc/resumes/` and the generated `resume_version` is stored on the tracker row.\n"
-            "- If a DOCX template is configured, the generator writes a formatted `.docx` resume using that template.\n"
-            "- If a Drive folder ID or URL is configured, the `.docx` resume is uploaded and converted into a Google Doc in that folder.\n"
+            "## Application Materials\n\n"
+            "- Jobs added to the tracker generate versioned resume and cover letter drafts during the `jobs` workflow.\n"
+            "- Existing tracker rows can be backfilled with fresh materials through `python app.py --workflow backfill-materials`.\n"
+            "- Use `backfill-resumes` or `backfill-cover-letters` when only one artifact type needs the one-off pass.\n"
+            "- Resume drafts are written under `output/doc/resumes/` and the generated `resume_version` is stored on the tracker row.\n"
+            "- Cover letters are written under `output/doc/cover_letters/` as Markdown and DOCX, and the generated `cover_letter_version` is stored on the tracker row.\n"
+            "- If a resume DOCX template is configured, the generator writes a formatted `.docx` resume using that template.\n"
+            "- If a cover letter DOCX template is configured, the generator uses it as both the cover letter format source and writing-style reference.\n"
+            "- If a Drive folder ID or URL is configured, resume and cover letter DOCX files are uploaded and converted into Google Docs in that folder.\n"
             "- Drive publishing can use Workspace delegation or direct service-account upload when the target folder is shared with the service account.\n"
             f"- Resume reference documents configured: `{has_resume_references}`\n"
-            "- Resume generation failures are surfaced in `needs_review` as `resume_generation_unavailable` instead of silently skipping the issue.\n\n"
+            "- Resume and cover letter generation failures are surfaced in `needs_review` instead of silently skipping the issue.\n\n"
             "## Documentation Refresh\n\n"
             "- Preset workflows refresh documentation after completion.\n"
             "- Docs are rewritten only when content changes.\n"
@@ -590,8 +594,8 @@ class DocumentationService:
             "## Working Surface\n\n"
             f"- Prompt files: \n{prompt_lines}\n"
             f"- Schemas live under `schemas/`:\n{schema_lines}\n"
-            "- `WorkflowOutput` is a public interface. Changes such as `resume_artifacts` should be treated as contract changes.\n"
-            "- Resume drafting behavior is split between `job_agent/resume.py`, `job_agent/agents/resume_writer.py`, Drive publishing in `job_agent/tools/drive.py`, and tracker sync in the orchestrator.\n"
+            "- `WorkflowOutput` is a public interface. Changes such as `resume_artifacts` and `cover_letter_artifacts` should be treated as contract changes.\n"
+            "- Application-material drafting behavior is split between `job_agent/resume.py`, writer agents, Drive publishing in `job_agent/tools/drive.py`, and tracker sync in the orchestrator.\n"
             "- The explain path is available through `python app.py --explain \"<question>\"`.\n"
         )
 
@@ -750,7 +754,7 @@ class ExplainService:
         manifest = self.documentation_service.build_manifest()
         workflows = ", ".join(sorted(manifest.workflows))
         answer = (
-            "The system runs four preset workflows. "
+            "The system runs preset workflows for daily orchestration, targeted job search, Gmail sync, reflection, and one-off material backfills. "
             f"`{workflows}` cover job intake, Gmail monitoring, tracker sync, and reflection. "
             "Jobs are scored against the candidate profile, QA can block unsafe actions, and documentation refresh runs after preset workflows."
         )

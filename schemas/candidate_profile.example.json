@@ -8,6 +8,8 @@
   },
   "salary_floor": 65000,
   "top_level_objective": "maximize qualified interview probability within 30 days while respecting salary, location, and role constraints",
+  "resume_template_document_path": "/absolute/path/to/Resume Template.docx",
+  "cover_letter_template_document_path": "/absolute/path/to/Cover Letter Template.docx",
   "company_priorities": {
     "example company": 0.2
   },

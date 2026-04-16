@@ -8,9 +8,9 @@ from typing import Any
 
 from job_agent.docs.service import DocumentationService
 from job_agent.events import WorkflowEvent
-from job_agent.models import GmailUpdate, JobRecord, QAResult, ResumeArtifact, ReviewItem, TrackerUpdate, WorkflowOutput
+from job_agent.models import CoverLetterArtifact, GmailUpdate, JobRecord, QAResult, ResumeArtifact, ReviewItem, TrackerUpdate, WorkflowOutput
 from job_agent.qa import QAEventDispatcher
-from job_agent.resume import generate_resume_artifact_impl
+from job_agent.resume import generate_cover_letter_artifact_impl, generate_resume_artifact_impl
 from job_agent.runtime import (
     DEFAULT_GMAIL_QUERIES,
     DEFAULT_SEARCH_SOURCES,
@@ -96,17 +96,8 @@ def combine_reason(*parts: str | None) -> str | None:
 
 
 def should_tailor_resume(*, fit_score: Any, next_steps: str | None) -> str:
-    try:
-        normalized_fit_score = int(fit_score) if fit_score is not None else 0
-    except (TypeError, ValueError):
-        normalized_fit_score = 0
-
-    normalized_next_steps = normalize_text(next_steps)
-    if normalized_fit_score > 70:
-        return "yes"
-    if normalized_next_steps == normalize_text("Review quickly and decide whether to tailor the resume."):
-        return "yes"
-    return "no"
+    _ = fit_score, next_steps
+    return "yes"
 
 
 def append_review(output: WorkflowOutput, *, kind: str, reason: str, details: str | None = None, company: str | None = None, role_title: str | None = None) -> None:
@@ -155,6 +146,7 @@ def build_tracker_row_from_job(
     next_steps: str | None = None,
     priority: str | None = None,
     resume_version: str | None = None,
+    cover_letter_version: str | None = None,
 ) -> dict[str, Any]:
     return {
         "company": job.company,
@@ -165,6 +157,7 @@ def build_tracker_row_from_job(
         "careers_url": job.careers_url,
         "status": status,
         "resume_version": resume_version,
+        "cover_letter_version": cover_letter_version,
         "required_experience_years": job.required_experience_years,
         "candidate_experience_years": job.candidate_experience_years,
         "experience_gap_years": job.experience_gap_years,
@@ -178,6 +171,53 @@ def build_tracker_row_from_job(
         "tailor_resume": should_tailor_resume(fit_score=job.fit_score, next_steps=next_steps),
         "next_steps": next_steps,
     }
+
+
+def normalize_remote_or_local_value(value: Any) -> str:
+    normalized = normalize_text(value)
+    if normalized in {"remote", "local", "hybrid"}:
+        return normalized
+    return "unknown"
+
+
+def tracker_row_to_job_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "company": row.get("company"),
+        "role_title": row.get("role_title"),
+        "location": row.get("location"),
+        "source": row.get("source"),
+        "posting_url": row.get("posting_url"),
+        "careers_url": row.get("careers_url"),
+        "remote_or_local": normalize_remote_or_local_value(row.get("remote_or_local")),
+        "salary": row.get("salary"),
+        "description": row.get("notes") or row.get("match_summary"),
+        "fit_score": row.get("fit_score"),
+        "match_summary": row.get("match_summary"),
+        "required_experience_years": row.get("required_experience_years"),
+        "candidate_experience_years": row.get("candidate_experience_years"),
+        "experience_gap_years": row.get("experience_gap_years"),
+        "duplicate_key": row.get("duplicate_key") or build_duplicate_key(row.get("company"), row.get("role_title"), row.get("location")),
+    }
+
+
+def job_record_from_tracker_row(row: dict[str, Any]) -> JobRecord:
+    return JobRecord(
+        company=row.get("company"),
+        role_title=row.get("role_title"),
+        location=row.get("location"),
+        source=row.get("source"),
+        posting_url=row.get("posting_url"),
+        careers_url=row.get("careers_url"),
+        salary=row.get("salary"),
+        remote_or_local=normalize_remote_or_local_value(row.get("remote_or_local")),
+        fit_score=row.get("fit_score"),
+        match_summary=row.get("match_summary"),
+        required_experience_years=row.get("required_experience_years"),
+        candidate_experience_years=row.get("candidate_experience_years"),
+        experience_gap_years=row.get("experience_gap_years"),
+        duplicate_key=row.get("duplicate_key") or build_duplicate_key(row.get("company"), row.get("role_title"), row.get("location")),
+        reason=row.get("notes"),
+    )
 
 
 def gmail_status_for_classification(classification: str, existing_status: str | None = None) -> str:
@@ -786,15 +826,28 @@ class JobSearchOrchestrator:
             role_title=role_title,
         )
 
-    def _sync_job_to_tracker(self, output: WorkflowOutput, job: JobRecord, *, action: str, resume_version: str | None = None) -> None:
+    def _sync_job_to_tracker(
+        self,
+        output: WorkflowOutput,
+        job: JobRecord,
+        *,
+        action: str,
+        resume_version: str | None = None,
+        cover_letter_version: str | None = None,
+    ) -> None:
         if action not in {"prioritize", "track"}:
             return
-        next_steps = "Review quickly and decide whether to tailor the resume." if action == "prioritize" else "Track and monitor for updates."
+        next_steps = (
+            "Use the tailored resume and cover letter for application prep."
+            if action == "prioritize"
+            else "Use the tailored resume and cover letter, then track and monitor for updates."
+        )
         tracker_row = build_tracker_row_from_job(
             job,
             next_steps=next_steps,
             priority="high" if action == "prioritize" else "normal",
             resume_version=resume_version,
+            cover_letter_version=cover_letter_version,
         )
         result = upsert_tracker_row_impl(
             sheet_url=self.candidate_profile["sheet_url"],
@@ -831,11 +884,9 @@ class JobSearchOrchestrator:
         record: JobRecord,
         action: str,
     ) -> str | None:
-        if not self.candidate_profile.get("resume_reference_documents"):
+        if action not in {"prioritize", "track"}:
             return None
-
-        next_steps = "Review quickly and decide whether to tailor the resume." if action == "prioritize" else "Track and monitor for updates."
-        if should_tailor_resume(fit_score=record.fit_score, next_steps=next_steps) != "yes":
+        if not self.candidate_profile.get("resume_reference_documents"):
             return None
 
         try:
@@ -885,6 +936,66 @@ class JobSearchOrchestrator:
             )
         return artifact.version
 
+    def _maybe_generate_cover_letter_artifact(
+        self,
+        output: WorkflowOutput,
+        *,
+        job: dict[str, Any],
+        record: JobRecord,
+        action: str,
+    ) -> str | None:
+        if action not in {"prioritize", "track"}:
+            return None
+        if not self.candidate_profile.get("resume_reference_documents"):
+            return None
+
+        try:
+            result = generate_cover_letter_artifact_impl(candidate_profile=self.candidate_profile, job=job)
+        except Exception as exc:
+            append_review(
+                output,
+                kind="cover_letter_generation_unavailable",
+                reason="Cover letter drafting was requested but the cover letter could not be generated.",
+                details=str(exc),
+                company=record.company,
+                role_title=record.role_title,
+            )
+            return None
+        if not result.get("implemented", False):
+            append_review(
+                output,
+                kind="cover_letter_generation_unavailable",
+                reason="Cover letter drafting was requested but the cover letter could not be generated.",
+                details=result.get("reason"),
+                company=record.company,
+                role_title=record.role_title,
+            )
+            return None
+
+        try:
+            artifact = CoverLetterArtifact.model_validate(result.get("artifact") or {})
+        except Exception as exc:
+            append_review(
+                output,
+                kind="cover_letter_generation_unavailable",
+                reason="Cover letter drafting returned an invalid artifact payload.",
+                details=str(exc),
+                company=record.company,
+                role_title=record.role_title,
+            )
+            return None
+        output.cover_letter_artifacts.append(artifact)
+        if artifact.google_doc_error:
+            append_review(
+                output,
+                kind="cover_letter_google_doc_unavailable",
+                reason="The tailored cover letter was generated locally, but Google Docs publishing did not complete.",
+                details=artifact.google_doc_error,
+                company=record.company,
+                role_title=record.role_title,
+            )
+        return artifact.version
+
     def _job_with_tracker_experience_overrides(
         self,
         job: dict[str, Any],
@@ -900,6 +1011,130 @@ class JobSearchOrchestrator:
             if existing_value not in (None, "", []):
                 merged_job[field] = existing_value
         return merged_job
+
+    def _backfill_tracker_materials(
+        self,
+        *,
+        generate_resume: bool,
+        generate_cover_letter: bool,
+        overwrite_existing: bool = True,
+        refresh_docs: bool = True,
+    ) -> WorkflowOutput:
+        output = WorkflowOutput()
+        sheet_result = read_tracker_sheet_impl(self.candidate_profile["sheet_url"])
+        tracker_rows = sheet_result.get("rows", []) if sheet_result.get("implemented", False) else []
+        output.summary.jobs_reviewed = len(tracker_rows)
+
+        if not sheet_result.get("implemented", False):
+            append_review(
+                output,
+                kind="tracker_unavailable",
+                reason="Tracker rows could not be read for application-material backfill.",
+                details=sheet_result.get("reason"),
+            )
+            return output
+
+        for row in tracker_rows:
+            record = job_record_from_tracker_row(row)
+            if not record.company or not record.role_title:
+                append_review(
+                    output,
+                    kind="tracker_row_missing_job_identity",
+                    reason="A tracker row needs company and role title before application materials can be generated.",
+                    company=record.company,
+                    role_title=record.role_title,
+                )
+                continue
+
+            job_payload = tracker_row_to_job_payload(row)
+            resume_version = row.get("resume_version")
+            cover_letter_version = row.get("cover_letter_version")
+
+            if generate_resume and (overwrite_existing or not resume_version):
+                resume_version = self._maybe_generate_resume_artifact(
+                    output,
+                    job=job_payload,
+                    record=record,
+                    action="track",
+                )
+            if generate_cover_letter and (overwrite_existing or not cover_letter_version):
+                cover_letter_version = self._maybe_generate_cover_letter_artifact(
+                    output,
+                    job=job_payload,
+                    record=record,
+                    action="track",
+                )
+
+            update_row = {
+                "company": record.company,
+                "role_title": record.role_title,
+                "location": record.location,
+                "duplicate_key": record.duplicate_key,
+                "tailor_resume": "yes",
+                "resume_version": resume_version if generate_resume else None,
+                "cover_letter_version": cover_letter_version if generate_cover_letter else None,
+            }
+            if update_row["resume_version"] is None and update_row["cover_letter_version"] is None:
+                continue
+
+            result = upsert_tracker_row_impl(
+                sheet_url=self.candidate_profile["sheet_url"],
+                row=update_row,
+                duplicate_key=record.duplicate_key or "",
+                match_strategy="hybrid",
+            )
+            if not result.get("implemented", True):
+                self._append_tracker_write_failure(
+                    output,
+                    kind="tracker_unavailable",
+                    reason="Generated application-material versions could not be written back to the tracker.",
+                    details=result.get("reason"),
+                    company=record.company,
+                    role_title=record.role_title,
+                )
+                continue
+            self._record_tracker_update(
+                output,
+                persisted_row=result.get("row") or {},
+                fallback_row=update_row,
+                update_type=str(result.get("status", "updated")),
+                notes="Backfilled application materials.",
+                company=record.company,
+                role_title=record.role_title,
+                duplicate_key=record.duplicate_key,
+            )
+
+        output.assistant_response = (
+            f"Backfilled {len(output.resume_artifacts)} resumes and "
+            f"{len(output.cover_letter_artifacts)} cover letters across {len(tracker_rows)} tracker rows."
+        )
+        if refresh_docs:
+            self._refresh_documentation("backfill_materials", output)
+        return output
+
+    def backfill_tracker_resumes(self, *, overwrite_existing: bool = True, refresh_docs: bool = True) -> WorkflowOutput:
+        return self._backfill_tracker_materials(
+            generate_resume=True,
+            generate_cover_letter=False,
+            overwrite_existing=overwrite_existing,
+            refresh_docs=refresh_docs,
+        )
+
+    def backfill_tracker_cover_letters(self, *, overwrite_existing: bool = True, refresh_docs: bool = True) -> WorkflowOutput:
+        return self._backfill_tracker_materials(
+            generate_resume=False,
+            generate_cover_letter=True,
+            overwrite_existing=overwrite_existing,
+            refresh_docs=refresh_docs,
+        )
+
+    def backfill_tracker_application_materials(self, *, overwrite_existing: bool = True, refresh_docs: bool = True) -> WorkflowOutput:
+        return self._backfill_tracker_materials(
+            generate_resume=True,
+            generate_cover_letter=True,
+            overwrite_existing=overwrite_existing,
+            refresh_docs=refresh_docs,
+        )
 
     def run_jobs(self, *, refresh_docs: bool = True) -> WorkflowOutput:
         output = WorkflowOutput()
@@ -997,7 +1232,19 @@ class JobSearchOrchestrator:
                 record=record,
                 action=action,
             )
-            self._sync_job_to_tracker(output, record, action=action, resume_version=resume_version)
+            cover_letter_version = self._maybe_generate_cover_letter_artifact(
+                output,
+                job=job,
+                record=record,
+                action=action,
+            )
+            self._sync_job_to_tracker(
+                output,
+                record,
+                action=action,
+                resume_version=resume_version,
+                cover_letter_version=cover_letter_version,
+            )
 
         output.new_jobs.sort(key=lambda job: job.fit_score or 0, reverse=True)
         output.summary.jobs_added = kept_count
@@ -1199,6 +1446,8 @@ class JobSearchOrchestrator:
             summary=jobs_output.summary.model_copy(deep=True),
             new_jobs=[*jobs_output.new_jobs],
             gmail_updates=[*gmail_output.gmail_updates],
+            resume_artifacts=[*jobs_output.resume_artifacts],
+            cover_letter_artifacts=[*jobs_output.cover_letter_artifacts],
             tracker_updates=[*jobs_output.tracker_updates, *gmail_output.tracker_updates],
             qa_results=[*jobs_output.qa_results, *gmail_output.qa_results, *reflect_output.qa_results],
             documentation_updates=[],

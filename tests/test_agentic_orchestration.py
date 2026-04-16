@@ -223,13 +223,13 @@ def test_decide_job_action_applies_thresholds_and_stale_skip() -> None:
     assert stale_action[0] == "skip"
 
 
-def test_should_tailor_resume_returns_yes_for_fit_score_or_next_steps() -> None:
+def test_should_tailor_resume_always_returns_yes_for_tracked_jobs() -> None:
     assert should_tailor_resume(fit_score=71, next_steps="Track and monitor for updates.") == "yes"
     assert should_tailor_resume(
         fit_score=60,
         next_steps="Review quickly and decide whether to tailor the resume.",
     ) == "yes"
-    assert should_tailor_resume(fit_score=60, next_steps="Track and monitor for updates.") == "no"
+    assert should_tailor_resume(fit_score=60, next_steps="Track and monitor for updates.") == "yes"
 
 
 def test_build_tracker_row_from_job_sets_tailor_resume_flag() -> None:
@@ -253,10 +253,12 @@ def test_build_tracker_row_from_job_sets_tailor_resume_flag() -> None:
         ),
         next_steps="Review quickly and decide whether to tailor the resume.",
         resume_version="v1.0",
+        cover_letter_version="v1.0",
     )
 
     assert row["tailor_resume"] == "yes"
     assert row["resume_version"] == "v1.0"
+    assert row["cover_letter_version"] == "v1.0"
     assert row["required_experience_years"] == 5.0
     assert row["candidate_experience_years"] == 6.2
     assert row["experience_gap_years"] == 1.2

@@ -6,7 +6,15 @@ from job_agent.docs.models import DocumentationStateSnapshot
 from job_agent.docs.service import DocumentationService
 from job_agent.models import WorkflowOutput
 from job_agent.state import NullStateStore, StateStoreStatus, build_default_goal_state, build_default_strategy_snapshot
-from job_agent.workflows import run_gmail_workflow, run_jobs_workflow, run_preset_workflow, run_reflect_workflow
+from job_agent.workflows import (
+    run_backfill_cover_letters_workflow,
+    run_backfill_materials_workflow,
+    run_backfill_resumes_workflow,
+    run_gmail_workflow,
+    run_jobs_workflow,
+    run_preset_workflow,
+    run_reflect_workflow,
+)
 
 
 PROFILE = {
@@ -332,6 +340,20 @@ def test_run_jobs_workflow_generates_resume_artifact_for_tailored_jobs(monkeypat
             },
         },
     )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.generate_cover_letter_artifact_impl",
+        lambda **_kwargs: {
+            "implemented": True,
+            "artifact": {
+                "company": "Acme",
+                "role_title": "Solutions Engineer",
+                "version": "v1.0",
+                "output_path": str(tmp_path / "output" / "doc" / "cover_letters" / "acme__solutions-engineer__v1.0.md"),
+                "format": "markdown",
+                "source_labels": ["Solutions Engineer Resume (v1.0)"],
+            },
+        },
+    )
 
     def fake_upsert_tracker_row(**kwargs):
         tracker_rows_written.append(kwargs["row"])
@@ -343,7 +365,181 @@ def test_run_jobs_workflow_generates_resume_artifact_for_tailored_jobs(monkeypat
 
     assert len(result.resume_artifacts) == 1
     assert result.resume_artifacts[0].version == "v1.0"
+    assert len(result.cover_letter_artifacts) == 1
+    assert result.cover_letter_artifacts[0].version == "v1.0"
     assert tracker_rows_written[0]["resume_version"] == "v1.0"
+    assert tracker_rows_written[0]["cover_letter_version"] == "v1.0"
+
+
+def test_backfill_materials_workflow_generates_for_tracker_rows(monkeypatch, tmp_path) -> None:
+    store = FakeStateStore()
+    tracker_rows_written = []
+    profile = {
+        **PROFILE,
+        "resume_reference_documents": [
+            {
+                "label": "Solutions Engineer Resume",
+                "version": "v1.0",
+                "path": "/tmp/solutions.docx",
+                "kind": "resume",
+            }
+        ],
+    }
+    patch_store(monkeypatch, store)
+    patch_docs_service(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "job_agent.orchestrator.read_tracker_sheet_impl",
+        lambda _sheet_url: {
+            "implemented": True,
+            "rows": [
+                {
+                    "company": "Acme",
+                    "role_title": "Solutions Engineer",
+                    "location": "Remote - US",
+                    "source": "company_sites",
+                    "posting_url": "https://example.com/jobs/1",
+                    "remote_or_local": "remote",
+                    "fit_score": 82,
+                    "match_summary": "strong",
+                    "duplicate_key": "acme::solutions engineer::remote us",
+                },
+                {
+                    "company": "Beta",
+                    "role_title": "Integration Engineer",
+                    "location": "Remote - US",
+                    "source": "linkedin",
+                    "remote_or_local": "remote",
+                    "fit_score": 75,
+                    "match_summary": "good",
+                    "duplicate_key": "beta::integration engineer::remote us",
+                },
+            ],
+        },
+    )
+
+    def fake_generate_resume_artifact_impl(**kwargs):
+        job = kwargs["job"]
+        return {
+            "implemented": True,
+            "artifact": {
+                "company": job["company"],
+                "role_title": job["role_title"],
+                "version": "v1.0",
+                "output_path": str(tmp_path / "output" / "doc" / "resumes" / f"{job['company']}.md"),
+                "format": "markdown",
+                "source_labels": ["Solutions Engineer Resume (v1.0)"],
+            },
+        }
+
+    def fake_generate_cover_letter_artifact_impl(**kwargs):
+        job = kwargs["job"]
+        return {
+            "implemented": True,
+            "artifact": {
+                "company": job["company"],
+                "role_title": job["role_title"],
+                "version": "v1.0",
+                "output_path": str(tmp_path / "output" / "doc" / "cover_letters" / f"{job['company']}.md"),
+                "format": "markdown",
+                "source_labels": ["Solutions Engineer Resume (v1.0)"],
+            },
+        }
+
+    monkeypatch.setattr("job_agent.orchestrator.generate_resume_artifact_impl", fake_generate_resume_artifact_impl)
+    monkeypatch.setattr("job_agent.orchestrator.generate_cover_letter_artifact_impl", fake_generate_cover_letter_artifact_impl)
+
+    def fake_upsert_tracker_row(**kwargs):
+        tracker_rows_written.append(kwargs["row"])
+        return {"implemented": True, "status": "updated", "row": kwargs["row"]}
+
+    monkeypatch.setattr("job_agent.orchestrator.upsert_tracker_row_impl", fake_upsert_tracker_row)
+
+    result = run_backfill_materials_workflow(profile)
+
+    assert result.summary.jobs_reviewed == 2
+    assert result.summary.tracker_rows_updated == 2
+    assert len(result.resume_artifacts) == 2
+    assert len(result.cover_letter_artifacts) == 2
+    assert {row["company"] for row in tracker_rows_written} == {"Acme", "Beta"}
+    assert all(row["resume_version"] == "v1.0" for row in tracker_rows_written)
+    assert all(row["cover_letter_version"] == "v1.0" for row in tracker_rows_written)
+
+
+def test_backfill_single_material_workflows_update_only_requested_version(monkeypatch, tmp_path) -> None:
+    profile = {
+        **PROFILE,
+        "resume_reference_documents": [
+            {
+                "label": "Solutions Engineer Resume",
+                "version": "v1.0",
+                "path": "/tmp/solutions.docx",
+                "kind": "resume",
+            }
+        ],
+    }
+    tracker_rows_written = []
+    patch_store(monkeypatch, FakeStateStore())
+    patch_docs_service(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "job_agent.orchestrator.read_tracker_sheet_impl",
+        lambda _sheet_url: {
+            "implemented": True,
+            "rows": [
+                {
+                    "company": "Acme",
+                    "role_title": "Solutions Engineer",
+                    "location": "Remote",
+                    "duplicate_key": "acme::solutions engineer::remote",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.generate_resume_artifact_impl",
+        lambda **_kwargs: {
+            "implemented": True,
+            "artifact": {
+                "company": "Acme",
+                "role_title": "Solutions Engineer",
+                "version": "v1.0",
+                "output_path": str(tmp_path / "resume.md"),
+                "format": "markdown",
+                "source_labels": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.generate_cover_letter_artifact_impl",
+        lambda **_kwargs: {
+            "implemented": True,
+            "artifact": {
+                "company": "Acme",
+                "role_title": "Solutions Engineer",
+                "version": "v1.0",
+                "output_path": str(tmp_path / "cover-letter.md"),
+                "format": "markdown",
+                "source_labels": [],
+            },
+        },
+    )
+
+    def fake_upsert_tracker_row(**kwargs):
+        tracker_rows_written.append(kwargs["row"])
+        return {"implemented": True, "status": "updated", "row": kwargs["row"]}
+
+    monkeypatch.setattr("job_agent.orchestrator.upsert_tracker_row_impl", fake_upsert_tracker_row)
+
+    resume_result = run_backfill_resumes_workflow(profile)
+    cover_letter_result = run_backfill_cover_letters_workflow(profile)
+
+    assert len(resume_result.resume_artifacts) == 1
+    assert len(resume_result.cover_letter_artifacts) == 0
+    assert tracker_rows_written[0]["resume_version"] == "v1.0"
+    assert tracker_rows_written[0]["cover_letter_version"] is None
+    assert len(cover_letter_result.resume_artifacts) == 0
+    assert len(cover_letter_result.cover_letter_artifacts) == 1
+    assert tracker_rows_written[1]["resume_version"] is None
+    assert tracker_rows_written[1]["cover_letter_version"] == "v1.0"
 
 
 def test_run_gmail_workflow_records_outcomes_and_immediate_review(monkeypatch, tmp_path) -> None:

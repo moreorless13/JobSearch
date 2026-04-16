@@ -74,6 +74,29 @@ def test_normalize_workflow_output_accepts_follow_up_questions() -> None:
     assert result.follow_up_questions[0].required is True
 
 
+def test_normalize_workflow_output_accepts_blank_job_numeric_fields() -> None:
+    result = normalize_workflow_output(
+        {
+            "new_jobs": [
+                {
+                    "company": "Acme",
+                    "role_title": "Solutions Engineer",
+                    "fit_score": "",
+                    "required_experience_years": " ",
+                    "candidate_experience_years": "",
+                    "experience_gap_years": "",
+                }
+            ]
+        }
+    )
+
+    job = result.new_jobs[0]
+    assert job.fit_score is None
+    assert job.required_experience_years is None
+    assert job.candidate_experience_years is None
+    assert job.experience_gap_years is None
+
+
 def test_normalize_workflow_output_preserves_text_follow_up_question() -> None:
     result = normalize_workflow_output("Which role titles should I prioritize first?")
 

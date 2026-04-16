@@ -43,6 +43,12 @@ AGENT_SPECS: dict[str, dict[str, Any]] = {
         "handoffs": [],
         "tools": [],
     },
+    "CoverLetterWriterAgent": {
+        "prompt_name": "cover_letter_writer.txt",
+        "handoff_description": "Drafts tailored cover letter artifacts from the candidate profile, reference resumes, and target job details.",
+        "handoffs": [],
+        "tools": [],
+    },
 }
 
 

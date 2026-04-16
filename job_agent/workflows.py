@@ -21,11 +21,26 @@ def run_reflect_workflow(candidate_profile: dict) -> WorkflowOutput:
     return JobSearchOrchestrator(candidate_profile).run_reflect()
 
 
+def run_backfill_resumes_workflow(candidate_profile: dict, *, overwrite_existing: bool = True) -> WorkflowOutput:
+    return JobSearchOrchestrator(candidate_profile).backfill_tracker_resumes(overwrite_existing=overwrite_existing)
+
+
+def run_backfill_cover_letters_workflow(candidate_profile: dict, *, overwrite_existing: bool = True) -> WorkflowOutput:
+    return JobSearchOrchestrator(candidate_profile).backfill_tracker_cover_letters(overwrite_existing=overwrite_existing)
+
+
+def run_backfill_materials_workflow(candidate_profile: dict, *, overwrite_existing: bool = True) -> WorkflowOutput:
+    return JobSearchOrchestrator(candidate_profile).backfill_tracker_application_materials(overwrite_existing=overwrite_existing)
+
+
 WORKFLOW_RUNNERS: dict[str, WorkflowRunner] = {
     "jobs": lambda orchestrator: orchestrator.run_jobs(),
     "gmail": lambda orchestrator: orchestrator.run_gmail(),
     "reflect": lambda orchestrator: orchestrator.run_reflect(),
     "daily": lambda orchestrator: orchestrator.run_daily(),
+    "backfill-resumes": lambda orchestrator: orchestrator.backfill_tracker_resumes(),
+    "backfill-cover-letters": lambda orchestrator: orchestrator.backfill_tracker_cover_letters(),
+    "backfill-materials": lambda orchestrator: orchestrator.backfill_tracker_application_materials(),
 }
 
 

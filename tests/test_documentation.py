@@ -294,6 +294,6 @@ def test_explain_service_answers_change_and_rejection_questions(tmp_path: Path) 
 
     assert "Recent behavior changes" in recent_changes.answer
     assert recent_changes.citations
-    assert "The system runs four preset workflows" in system_answer.answer
+    assert "The system runs preset workflows" in system_answer.answer
     assert "most recent skipped job" in rejection_answer.answer
     assert rejection_answer.citations[0].reference == "decision_1"

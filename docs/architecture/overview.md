@@ -2,11 +2,14 @@
 
 Current behavior version: `1.0.0`
 
-The system finds jobs, scores them, optionally drafts versioned tailored resumes, publishes formatted Google Doc copies when Drive is configured, scans Gmail for updates, syncs the tracker, and reflects on outcomes to adjust strategy.
+The system finds jobs, scores them, drafts versioned tailored resumes and cover letters for tracked jobs, publishes formatted resume and cover letter Google Docs when Drive is configured, scans Gmail for updates, syncs the tracker, and reflects on outcomes to adjust strategy.
 
 ## Workflows
 
 - `daily`: Run today's workflow: search jobs, update the tracker, scan Gmail, and summarize changes.
+- `backfill-cover-letters`: Generate cover letters for existing tracker rows and write cover letter versions back to the tracker.
+- `backfill-materials`: Generate tailored resumes and cover letters for existing tracker rows and write versions back to the tracker.
+- `backfill-resumes`: Generate tailored resumes for existing tracker rows and write resume versions back to the tracker.
 - `gmail`: Scan Gmail for job-related updates, sync the tracker, and summarize changes.
 - `jobs`: Search for new matching jobs, update the tracker, and summarize changes.
 - `reflect`: Review recent outcomes, update strategy weights, and summarize the changes.
@@ -14,6 +17,7 @@ The system finds jobs, scores them, optionally drafts versioned tailored resumes
 ## Agent Graph
 
 - `CoordinatorAgent` hands off to JobSearchAgent, TrackerAgent, GmailMonitorAgent and uses tools: none.
+- `CoverLetterWriterAgent` hands off to no specialists and uses tools: none.
 - `GmailMonitorAgent` hands off to no specialists and uses tools: search_gmail_job_updates, classify_job_email, match_email_to_tracker, read_tracker_sheet, upsert_tracker_row.
 - `JobSearchAgent` hands off to no specialists and uses tools: search_jobs, score_job_fit.
 - `ResumeWriterAgent` hands off to no specialists and uses tools: none.

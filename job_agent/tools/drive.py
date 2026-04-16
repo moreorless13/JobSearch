@@ -119,12 +119,12 @@ def upload_docx_as_google_doc_impl(
     if not source_path.exists():
         return {
             "implemented": False,
-            "reason": f"DOCX resume artifact does not exist: {source_path}",
+            "reason": f"DOCX artifact does not exist: {source_path}",
         }
     if not resolved_folder_id:
         return {
             "implemented": False,
-            "reason": "A Google Drive folder ID or folder URL is required before publishing resume Google Docs.",
+            "reason": "A Google Drive folder ID or folder URL is required before publishing Google Docs.",
         }
 
     delegated_user = resolve_drive_delegated_user()

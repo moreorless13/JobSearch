@@ -11,7 +11,14 @@ from job_agent.state import QAVerdict
 
 BaseModel = cast(Any, pydantic_module).BaseModel
 Field = cast(Any, pydantic_module).Field
+field_validator = cast(Any, pydantic_module).field_validator
 ValidationError = cast(Any, pydantic_module).ValidationError
+
+
+def _blank_string_to_none(value: Any) -> Any:
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
 
 
 class SummaryCounts(BaseModel):
@@ -43,6 +50,17 @@ class JobRecord(BaseModel):
     duplicate_key: str | None = None
     reason: str | None = None
 
+    @field_validator(
+        "fit_score",
+        "required_experience_years",
+        "candidate_experience_years",
+        "experience_gap_years",
+        mode="before",
+    )
+    @classmethod
+    def blank_optional_numeric_fields_to_none(cls, value: Any) -> Any:
+        return _blank_string_to_none(value)
+
 
 class TrackerUpdate(BaseModel):
     company: str | None = None
@@ -64,6 +82,19 @@ class GmailUpdate(BaseModel):
 
 
 class ResumeArtifact(BaseModel):
+    company: str | None = None
+    role_title: str | None = None
+    version: str
+    output_path: str
+    format: str = "markdown"
+    docx_path: str | None = None
+    google_doc_id: str | None = None
+    google_doc_url: str | None = None
+    google_doc_error: str | None = None
+    source_labels: list[str] = Field(default_factory=list)
+
+
+class CoverLetterArtifact(BaseModel):
     company: str | None = None
     role_title: str | None = None
     version: str
@@ -109,6 +140,7 @@ class WorkflowOutput(BaseModel):
     new_jobs: list[JobRecord] = Field(default_factory=list)
     gmail_updates: list[GmailUpdate] = Field(default_factory=list)
     resume_artifacts: list[ResumeArtifact] = Field(default_factory=list)
+    cover_letter_artifacts: list[CoverLetterArtifact] = Field(default_factory=list)
     tracker_updates: list[TrackerUpdate] = Field(default_factory=list)
     qa_results: list[QAResult] = Field(default_factory=list)
     documentation_updates: list[DocumentationUpdate] = Field(default_factory=list)

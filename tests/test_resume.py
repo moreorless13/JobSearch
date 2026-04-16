@@ -6,8 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from job_agent.resume import (
+    CoverLetterDraft,
     ResumeDraft,
     build_resume_reference_packets,
+    generate_cover_letter_artifact_impl,
     generate_resume_artifact_impl,
     next_generated_resume_version,
     normalize_resume_reference_documents,
@@ -26,6 +28,29 @@ def write_minimal_resume_template(path: Path) -> None:
     <w:p><w:pPr><w:spacing w:after="0"/></w:pPr><w:r><w:rPr><w:b w:val="1"/></w:rPr><w:t>Dash Solutions</w:t></w:r></w:p>
     <w:p><w:pPr><w:spacing w:after="0"/></w:pPr><w:r><w:rPr><w:b w:val="1"/></w:rPr><w:t>Solutions Engineer | Jan 2024 - Jun 2024</w:t></w:r></w:p>
     <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:ind w:left="720" w:hanging="360"/></w:pPr><w:r><w:t>Built implementation guides.</w:t></w:r></w:p>
+    <w:sectPr/>
+  </w:body>
+</w:document>
+"""
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", document_xml)
+
+
+def write_minimal_cover_letter_template(path: Path) -> None:
+    document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{W_NS}">
+  <w:body>
+    <w:p><w:pPr><w:spacing w:after="0" w:before="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:t>James R. Strande</w:t></w:r></w:p>
+    <w:p><w:pPr><w:spacing w:after="0" w:before="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:t>Cedar Knolls, NJ</w:t></w:r></w:p>
+    <w:p><w:pPr><w:spacing w:after="0" w:before="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:t>strandejr@gmail.com</w:t></w:r></w:p>
+    <w:p><w:pPr><w:spacing w:after="0" w:before="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r/></w:p>
+    <w:p><w:pPr><w:spacing w:after="0" w:before="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:t>Hiring Team</w:t></w:r></w:p>
+    <w:p><w:pPr><w:spacing w:after="0" w:before="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:t>MVB Bank</w:t></w:r></w:p>
+    <w:p><w:pPr><w:spacing w:after="0" w:before="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r/></w:p>
+    <w:p><w:pPr><w:spacing w:after="0" w:before="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:t>Dear Hiring Team,</w:t></w:r></w:p>
+    <w:p><w:pPr><w:spacing w:after="240" w:before="240" w:lineRule="auto"/></w:pPr><w:r><w:t>I am writing to apply for the sample role at MVB Bank.</w:t></w:r></w:p>
+    <w:p><w:pPr><w:spacing w:after="240" w:before="240" w:lineRule="auto"/></w:pPr><w:r><w:t>Sincerely,</w:t></w:r></w:p>
+    <w:p><w:pPr><w:spacing w:after="240" w:before="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:b w:val="1"/></w:rPr><w:t>James R. Strande</w:t></w:r></w:p>
     <w:sectPr/>
   </w:body>
 </w:document>
@@ -125,6 +150,26 @@ class FakeRunnerWithExperience:
         )
 
 
+class FakeCoverLetterRunner:
+    @staticmethod
+    def run_sync(_agent, _input):
+        return SimpleNamespace(
+            final_output=CoverLetterDraft(
+                full_name="James Strande",
+                target_role="Solutions Engineer",
+                company="Acme",
+                greeting=None,
+                opening="I am interested in the Solutions Engineer role at Acme.",
+                body_paragraphs=[
+                    "My API integration and implementation experience matches the role's client-facing needs.",
+                    "I have created practical documentation and QA workflows that help teams ship reliable integrations.",
+                ],
+                closing="I would welcome the chance to discuss how this background can support Acme's customers.",
+                signature="James Strande",
+            )
+        )
+
+
 def test_generate_resume_artifact_impl_writes_versioned_markdown(tmp_path: Path) -> None:
     reference_path = tmp_path / "reference.md"
     reference_path.write_text("# Resume Reference\nAPI integrations\n", encoding="utf-8")
@@ -150,6 +195,67 @@ def test_generate_resume_artifact_impl_writes_versioned_markdown(tmp_path: Path)
     assert result["implemented"] is True
     assert result["artifact"]["version"] == "v1.0"
     assert Path(result["artifact"]["output_path"]).exists()
+
+
+def test_generate_cover_letter_artifact_impl_writes_docx_and_publishes_google_doc(monkeypatch, tmp_path: Path) -> None:
+    reference_path = tmp_path / "reference.md"
+    reference_path.write_text("# Resume Reference\nAPI integrations\n", encoding="utf-8")
+    template_path = tmp_path / "cover-letter-template.docx"
+    write_minimal_cover_letter_template(template_path)
+    uploads: list[dict[str, object]] = []
+
+    def fake_upload_docx_as_google_doc_impl(**kwargs):
+        uploads.append(kwargs)
+        assert Path(str(kwargs["docx_path"])).exists()
+        return {
+            "implemented": True,
+            "google_doc_id": "cover123",
+            "google_doc_url": "https://docs.google.com/document/d/cover123/edit",
+        }
+
+    monkeypatch.setattr("job_agent.tools.drive.upload_docx_as_google_doc_impl", fake_upload_docx_as_google_doc_impl)
+    profile = {
+        "candidate_name": "James Strande",
+        "cover_letter_template_document_path": str(template_path),
+        "resume_google_drive_folder_id": "folder123",
+        "resume_reference_documents": [
+            {
+                "label": "Master Resume",
+                "version": "v1.0",
+                "path": str(reference_path),
+                "kind": "resume",
+            }
+        ],
+    }
+
+    result = generate_cover_letter_artifact_impl(
+        candidate_profile=profile,
+        job={"company": "Acme", "role_title": "Solutions Engineer"},
+        runner_cls=FakeCoverLetterRunner,
+        root_dir=tmp_path,
+    )
+
+    artifact_path = Path(result["artifact"]["output_path"])
+    docx_path = Path(result["artifact"]["docx_path"])
+    assert result["implemented"] is True
+    assert result["artifact"]["version"] == "v1.0"
+    assert result["artifact"]["format"] == "markdown+docx"
+    assert result["artifact"]["google_doc_url"] == "https://docs.google.com/document/d/cover123/edit"
+    assert uploads[0]["folder_id"] == "folder123"
+    assert uploads[0]["name"] == "Acme - Solutions Engineer - Cover Letter v1.0"
+    assert artifact_path.exists()
+    assert docx_path.exists()
+    assert "Solutions Engineer role at Acme" in artifact_path.read_text(encoding="utf-8")
+    assert "Cover Letter Style Reference" in result["artifact"]["source_labels"]
+
+    with zipfile.ZipFile(docx_path) as archive:
+        root = ET.fromstring(archive.read("word/document.xml"))
+    text = "\n".join(node.text or "" for node in root.findall(f".//{{{W_NS}}}t"))
+    assert "James R. Strande" in text
+    assert "Hiring Team" in text
+    assert "Acme" in text
+    assert "MVB Bank" not in text
+    assert "Solutions Engineer role at Acme" in text
 
 
 def test_generate_resume_artifact_impl_writes_docx_and_publishes_google_doc(monkeypatch, tmp_path: Path) -> None:

@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the JobSearchAgent workflow.")
     parser.add_argument(
         "--workflow",
-        choices=("daily", "jobs", "gmail", "reflect"),
+        choices=("daily", "jobs", "gmail", "reflect", "backfill-resumes", "backfill-cover-letters", "backfill-materials"),
         default="daily",
         help="Which workflow preset to run.",
     )
