@@ -2,7 +2,7 @@
 
 Current behavior version: `1.0.0`
 
-The system finds jobs, scores them, optionally drafts versioned tailored resumes, scans Gmail for updates, syncs the tracker, and reflects on outcomes to adjust strategy.
+The system finds jobs, scores them, optionally drafts versioned tailored resumes, publishes formatted Google Doc copies when Drive is configured, scans Gmail for updates, syncs the tracker, and reflects on outcomes to adjust strategy.
 
 ## Workflows
 

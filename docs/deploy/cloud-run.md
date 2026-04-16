@@ -20,7 +20,7 @@ For the recommended Cloud Run setup, you do **not** need:
 
 The current code uses:
 
-- Google Workspace domain-wide delegation in `job_agent/tools/gmail.py` and `job_agent/tools/sheets.py`
+- Google Workspace domain-wide delegation in `job_agent/tools/gmail.py`, `job_agent/tools/sheets.py`, and `job_agent/tools/drive.py`
 - `REDIS_URL` for orchestration state in `job_agent/state.py`
 
 ## Recommended Google Cloud Architecture
@@ -31,6 +31,7 @@ The current code uses:
 - **Memorystore for Redis** if you want persistent orchestration state
 - **Google Sheets API** enabled in the same project as the service account
 - **Gmail API** enabled and domain-wide delegation authorized in Google Workspace Admin
+- **Google Drive API** enabled when publishing generated resumes as Google Docs
 
 ## Build The Container
 
@@ -61,6 +62,8 @@ gcloud run jobs create jobsearch-daily \
   --service-account your-cloud-run-sa@PROJECT_ID.iam.gserviceaccount.com \
   --set-env-vars OPENAI_MODEL=gpt-4.1-mini \
   --set-env-vars JOB_TRACKER_SHEET_URL="https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit" \
+  --set-env-vars RESUME_GOOGLE_DRIVE_FOLDER_ID="DRIVE_FOLDER_ID" \
+  --set-env-vars RESUME_GOOGLE_DRIVE_USE_DELEGATION="false" \
   --set-env-vars GOOGLE_DELEGATED_USER="user@your-domain.com" \
   --set-env-vars GOOGLE_SERVICE_ACCOUNT_EMAIL="your-cloud-run-sa@PROJECT_ID.iam.gserviceaccount.com" \
   --set-env-vars REDIS_URL="redis://REDIS_HOST:6379/0" \
@@ -75,19 +78,21 @@ Notes:
 - Use `--args="--workflow","reflect"` for strategy reflection.
 - If you do not want Redis yet, omit `REDIS_URL` and the app will run in degraded stateless mode.
 - Do not set `GOOGLE_APPLICATION_CREDENTIALS` on Cloud Run for the recommended keyless path.
-- Tailored resume drafts written under `output/doc/resumes/` live on the job's ephemeral filesystem unless you copy them to durable storage.
+- Tailored resume drafts written under `output/doc/resumes/` live on the job's ephemeral filesystem unless Drive publishing is configured.
 
 ## Domain-Wide Delegation Notes
 
-For Gmail to work with Workspace domain-wide delegation:
+For Google Workspace APIs to work with domain-wide delegation:
 
-1. Enable the Gmail API in Google Cloud.
+1. Enable the Gmail, Sheets, and Drive APIs in Google Cloud as needed by the workflows you run.
 2. Enable domain-wide delegation for the service account.
-3. In Google Workspace Admin, authorize the service account client ID for `https://www.googleapis.com/auth/gmail.readonly` and `https://www.googleapis.com/auth/spreadsheets`.
+3. In Google Workspace Admin, authorize the service account client ID for `https://www.googleapis.com/auth/gmail.readonly`, `https://www.googleapis.com/auth/spreadsheets`, and `https://www.googleapis.com/auth/drive.file`.
 4. Set `GOOGLE_DELEGATED_USER` to the mailbox you want the job to impersonate. `GMAIL_DELEGATED_USER` still works as a backward-compatible fallback.
 5. If you are using keyless ADC on Cloud Run, grant the runtime principal `Service Account Token Creator` on the target service account if your impersonation setup requires it.
 
 For Sheets, delegation now uses the same delegated user when present. If you choose not to use domain-wide delegation for Sheets, the tracker spreadsheet can still be shared with the service account email directly.
+
+For Drive publishing, delegation uses the same delegated user when present. If you choose not to use delegation for Drive, set `RESUME_GOOGLE_DRIVE_USE_DELEGATION=false` and share the destination folder with the service account email directly. The uploader will also fall back to direct service-account upload when delegated Drive upload fails.
 
 ## Redis On Cloud Run
 
@@ -129,4 +134,4 @@ gcloud run jobs executions describe EXECUTION_NAME --region us-central1
 - Sheets can use the same delegated Workspace user as Gmail, but direct spreadsheet sharing with the service account still works as a fallback.
 - Redis requires a reachable managed endpoint; local Homebrew Redis is only for local development.
 - Keyless ADC is now the preferred Cloud Run auth path; mounted service-account keys are only a fallback.
-- Generated resume artifacts are local files. If you need durable retention in Cloud Run, publish them to Cloud Storage or another persistent destination.
+- Generated resume artifacts are local files unless `RESUME_GOOGLE_DRIVE_FOLDER_ID` or `RESUME_GOOGLE_DRIVE_FOLDER_URL` is configured for Drive publishing.

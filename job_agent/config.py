@@ -41,6 +41,18 @@ def load_candidate_profile() -> dict[str, Any]:
     if override_sheet_url:
         profile["sheet_url"] = override_sheet_url
 
+    resume_template_path = os.getenv("RESUME_TEMPLATE_DOCX_PATH")
+    if resume_template_path:
+        profile["resume_template_document_path"] = resume_template_path
+
+    resume_drive_folder_id = os.getenv("RESUME_GOOGLE_DRIVE_FOLDER_ID")
+    if resume_drive_folder_id:
+        profile["resume_google_drive_folder_id"] = resume_drive_folder_id
+
+    resume_drive_folder_url = os.getenv("RESUME_GOOGLE_DRIVE_FOLDER_URL")
+    if resume_drive_folder_url:
+        profile["resume_google_drive_folder_url"] = resume_drive_folder_url
+
     profile.setdefault("top_level_objective", DEFAULT_TOP_LEVEL_OBJECTIVE)
     profile.setdefault("company_priorities", {})
     profile.setdefault("resume_reference_documents", [])

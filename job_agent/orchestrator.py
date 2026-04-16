@@ -874,6 +874,15 @@ class JobSearchOrchestrator:
             )
             return None
         output.resume_artifacts.append(artifact)
+        if artifact.google_doc_error:
+            append_review(
+                output,
+                kind="resume_google_doc_unavailable",
+                reason="The tailored resume was generated locally, but Google Docs publishing did not complete.",
+                details=artifact.google_doc_error,
+                company=record.company,
+                role_title=record.role_title,
+            )
         return artifact.version
 
     def _job_with_tracker_experience_overrides(

@@ -66,14 +66,18 @@ Optional `.env` values:
 - `OPENAI_MODEL` defaults to `gpt-4.1-mini`
 - `REDIS_URL` enables Redis-backed orchestration state. Example: `redis://localhost:6379/0`
 - `GMAIL_SEARCH_MAX_RESULTS` defaults to `25`
+- `RESUME_TEMPLATE_DOCX_PATH` points to the Word resume template used when generating formatted DOCX and Google Doc resumes
+- `RESUME_GOOGLE_DRIVE_FOLDER_ID` or `RESUME_GOOGLE_DRIVE_FOLDER_URL` publishes generated resume Google Docs into a specific Drive folder
+- `RESUME_GOOGLE_DRIVE_USE_DELEGATION=false` forces Drive publishing to use the service account directly, useful when the destination folder is shared with the service account
+- `RESUME_GOOGLE_DRIVE_DELEGATED_USER` overrides `GOOGLE_DELEGATED_USER` for Drive publishing only
 - `GOOGLE_SERVICE_ACCOUNT_EMAIL` for keyless delegated auth when the service account email cannot be detected from ADC automatically
-- `GOOGLE_DELEGATED_USER` for Workspace domain-wide delegation across Gmail and Sheets
+- `GOOGLE_DELEGATED_USER` for Workspace domain-wide delegation across Gmail, Sheets, and Drive
 - `GMAIL_DELEGATED_USER` remains supported as a Gmail-specific fallback
 - `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_SERVICE_ACCOUNT_FILE`, or `GOOGLE_SERVICE_ACCOUNT_JSON` only if you are intentionally overriding ambient ADC behavior
 
 If no key file or inline JSON is provided, the app now falls back to **Application Default Credentials**. That is the preferred Cloud Run path.
 
-If you do set `GOOGLE_APPLICATION_CREDENTIALS` or `GOOGLE_SERVICE_ACCOUNT_FILE`, either may point to a Google service-account JSON key or an ADC credentials file. For delegated Gmail or Sheets access, ADC-based files still need to resolve to a service account that can mint domain-wide delegated tokens.
+If you do set `GOOGLE_APPLICATION_CREDENTIALS` or `GOOGLE_SERVICE_ACCOUNT_FILE`, either may point to a Google service-account JSON key or an ADC credentials file. For delegated Gmail, Sheets, or Drive access, ADC-based files still need to resolve to a service account that can mint domain-wide delegated tokens.
 
 For Gmail access, this repo requires Google Workspace domain-wide delegation and does not use local OAuth token flows:
 
@@ -85,6 +89,8 @@ For Sheets access, either:
 
 - use domain-wide delegation with `GOOGLE_DELEGATED_USER` or `GMAIL_DELEGATED_USER`, or
 - share the tracker spreadsheet with the service account email as an editor
+
+For Drive publishing, share the destination folder with the service account and set `RESUME_GOOGLE_DRIVE_USE_DELEGATION=false`, or use `GOOGLE_DELEGATED_USER`/`RESUME_GOOGLE_DRIVE_DELEGATED_USER` for Workspace domain-wide delegation. If generic `GOOGLE_DELEGATED_USER` is set for Gmail, Drive will try delegated upload first and fall back to direct service-account upload.
 
 Delegation is the preferred production path for Cloud Run Jobs.
 
@@ -114,7 +120,7 @@ GOOGLE_SERVICE_ACCOUNT_EMAIL=YOUR_SERVICE_ACCOUNT@PROJECT_ID.iam.gserviceaccount
 
 `GOOGLE_DELEGATED_USER` must be a real Workspace mailbox, not the service account email. Without impersonation, Sheets can still work locally, but Gmail will not.
 
-The candidate profile is loaded from `schemas/candidate_profile.json`. `JOB_TRACKER_SHEET_URL` from `.env` overrides the sheet URL in that file at runtime. The candidate profile now also supports `top_level_objective`, `company_priorities`, `decision_thresholds`, and versioned `resume_reference_documents` for resume-writing flows.
+The candidate profile is loaded from `schemas/candidate_profile.json`. `JOB_TRACKER_SHEET_URL` from `.env` overrides the sheet URL in that file at runtime. The candidate profile now also supports `top_level_objective`, `company_priorities`, `decision_thresholds`, `resume_template_document_path`, `resume_google_drive_folder_id`, `resume_google_drive_folder_url`, and versioned `resume_reference_documents` for resume-writing flows.
 
 Example reference entry:
 
@@ -152,19 +158,22 @@ This repository is currently a CLI workload, so Google Cloud deployment should t
 Recommended deployment order:
 
 1. Enable the required Google Cloud APIs: Cloud Run, Cloud Build, Artifact Registry, Secret Manager, Gmail API, Sheets API, and Redis API if you want Memorystore.
-2. Confirm Google Workspace domain-wide delegation is authorized for the service account client ID with at least `https://www.googleapis.com/auth/gmail.readonly` and `https://www.googleapis.com/auth/spreadsheets`.
+2. Confirm Google Workspace domain-wide delegation is authorized for the service account client ID with at least `https://www.googleapis.com/auth/gmail.readonly`, `https://www.googleapis.com/auth/spreadsheets`, and `https://www.googleapis.com/auth/drive.file`.
 3. Create an Artifact Registry Docker repository.
 4. Create a Secret Manager secret for `OPENAI_API_KEY`. A Google credential secret is not required for the recommended keyless ADC path.
 5. Build and push the container image with `gcloud builds submit`.
 6. Provision Memorystore for Redis if you want Redis-backed orchestration state. Otherwise omit `REDIS_URL` and the app will run in degraded stateless mode.
 7. Attach the correct service account to the Cloud Run Job and grant it `Service Account Token Creator` on the delegated target account if required for your impersonation setup.
-8. Create a Cloud Run Job that sets `JOB_TRACKER_SHEET_URL`, `GOOGLE_DELEGATED_USER`, and any optional `REDIS_URL`. Set `GOOGLE_SERVICE_ACCOUNT_EMAIL` if the runtime cannot infer it automatically.
+8. Create a Cloud Run Job that sets `JOB_TRACKER_SHEET_URL`, `GOOGLE_DELEGATED_USER`, and any optional `REDIS_URL`. Set `RESUME_GOOGLE_DRIVE_FOLDER_ID` when resume Google Docs should be published to Drive. Set `GOOGLE_SERVICE_ACCOUNT_EMAIL` if the runtime cannot infer it automatically.
 9. Execute the job and inspect the first execution logs before scheduling it.
 
 Typical production env for the Cloud Run Job:
 
 ```env
 JOB_TRACKER_SHEET_URL=https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit
+RESUME_TEMPLATE_DOCX_PATH=/app/templates/MVB - Solutions Engineer Resume.docx
+RESUME_GOOGLE_DRIVE_FOLDER_ID=YOUR_DRIVE_FOLDER_ID
+RESUME_GOOGLE_DRIVE_USE_DELEGATION=false
 GOOGLE_DELEGATED_USER=user@yourdomain.com
 GOOGLE_SERVICE_ACCOUNT_EMAIL=your-cloud-run-sa@PROJECT_ID.iam.gserviceaccount.com
 OPENAI_MODEL=gpt-4.1-mini
@@ -198,6 +207,8 @@ All runs print a JSON payload with this top-level shape:
 
 - Resume drafts are generated only when the tracker decision resolves to `tailor_resume = yes`.
 - Generated drafts are versioned as `v1.0`, `v1.1`, and so on, and written under `output/doc/resumes/`.
+- When `resume_template_document_path` or `RESUME_TEMPLATE_DOCX_PATH` is configured, the generator also writes a formatted DOCX using that file as the Word template.
+- When `resume_google_drive_folder_id`, `resume_google_drive_folder_url`, `RESUME_GOOGLE_DRIVE_FOLDER_ID`, or `RESUME_GOOGLE_DRIVE_FOLDER_URL` is configured, the DOCX is uploaded to Drive and converted into a Google Doc in that folder.
 - The generated artifact version is also stored in the tracker row as `resume_version`.
 - Reference resumes should be explicitly labeled with their version number in `resume_reference_documents`.
 
@@ -214,7 +225,7 @@ All runs print a JSON payload with this top-level shape:
 - Tracker rows are matched primarily by `duplicate_key`, then by posting URL and company/title/location.
 - Existing tracker notes are preserved and new notes are appended.
 - When Redis is configured, the orchestrator stores decisions, outcomes, reflection summaries, and follow-up tasks there. Google Sheets remains the human-readable mirror, not the strategy source of truth.
-- Resume drafts generated under `output/doc/resumes/` are local artifacts. In ephemeral runtimes such as Cloud Run Jobs, publish them elsewhere if you need durable retention.
+- Resume drafts generated under `output/doc/resumes/` are local artifacts unless Drive publishing is configured.
 - Cloud Run production deployments should prefer ADC plus `GOOGLE_DELEGATED_USER`, not mounted long-lived keys.
 - `GOOGLE_SERVICE_ACCOUNT_EMAIL` exists for the annoying cases where ADC knows who it is but refuses to say it out loud.
 

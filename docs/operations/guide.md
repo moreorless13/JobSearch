@@ -22,6 +22,9 @@ Run the preset workflows through `python app.py --workflow <daily|jobs|gmail|ref
 
 - Jobs marked `tailor_resume = yes` can generate versioned resume drafts during the `jobs` workflow.
 - Drafts are written under `output/doc/resumes/` and the generated `resume_version` is stored on the tracker row.
+- If a DOCX template is configured, the generator writes a formatted `.docx` resume using that template.
+- If a Drive folder ID or URL is configured, the `.docx` resume is uploaded and converted into a Google Doc in that folder.
+- Drive publishing can use Workspace delegation or direct service-account upload when the target folder is shared with the service account.
 - Resume reference documents configured: `True`
 - Resume generation failures are surfaced in `needs_review` as `resume_generation_unavailable` instead of silently skipping the issue.
 

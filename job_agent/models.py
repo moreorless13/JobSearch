@@ -69,6 +69,10 @@ class ResumeArtifact(BaseModel):
     version: str
     output_path: str
     format: str = "markdown"
+    docx_path: str | None = None
+    google_doc_id: str | None = None
+    google_doc_url: str | None = None
+    google_doc_error: str | None = None
     source_labels: list[str] = Field(default_factory=list)
 
 

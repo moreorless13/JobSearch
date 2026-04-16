@@ -58,3 +58,30 @@ def test_load_candidate_profile_versions_resume_reference_labels(monkeypatch, tm
 
     assert loaded["resume_reference_documents"][0]["version"] == "v1.0"
     assert loaded["resume_reference_documents"][0]["label"] == "Solutions Engineer Resume (v1.0)"
+
+
+def test_load_candidate_profile_applies_resume_google_doc_env_overrides(monkeypatch, tmp_path) -> None:
+    profile_path = tmp_path / "candidate_profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "candidate_name": "James",
+                "location_rules": {"allow_remote": True, "radius_miles": 25, "origin": "Cedar Knolls, NJ"},
+                "salary_floor": 65000,
+                "target_roles": ["Solutions Engineer"],
+                "target_industries": ["FinTech"],
+                "keywords": ["API"],
+                "sheet_url": "https://example.com/sheet",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(config, "SCHEMAS_DIR", tmp_path)
+    monkeypatch.setenv("RESUME_TEMPLATE_DOCX_PATH", "/tmp/template.docx")
+    monkeypatch.setenv("RESUME_GOOGLE_DRIVE_FOLDER_ID", "folder123")
+
+    loaded = config.load_candidate_profile()
+
+    assert loaded["resume_template_document_path"] == "/tmp/template.docx"
+    assert loaded["resume_google_drive_folder_id"] == "folder123"

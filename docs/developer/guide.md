@@ -1,6 +1,6 @@
 # Developer Guide
 
-Current behavior version: `1.1.0`
+Current behavior version: `1.0.0`
 
 Add behavior changes in code, then let the documentation service capture the new manifest and render guides.
 
@@ -10,7 +10,6 @@ Add behavior changes in code, then let the documentation service capture the new
 - Major versions are reserved for workflow removals or output contract changes.
 - Minor versions cover new or changed behavior.
 - Patch versions cover documentation-only refreshes.
-- Changelog refreshes preserve existing entries and append new behavior changes at the end.
 
 ## Working Surface
 
@@ -26,5 +25,5 @@ Add behavior changes in code, then let the documentation service capture the new
 - `normalized_job.json`
 - `tracker_row.json`
 - `WorkflowOutput` is a public interface. Changes such as `resume_artifacts` should be treated as contract changes.
-- Resume drafting behavior is split between `job_agent/resume.py`, `job_agent/agents/resume_writer.py`, and tracker sync in the orchestrator.
+- Resume drafting behavior is split between `job_agent/resume.py`, `job_agent/agents/resume_writer.py`, Drive publishing in `job_agent/tools/drive.py`, and tracker sync in the orchestrator.
 - The explain path is available through `python app.py --explain "<question>"`.
