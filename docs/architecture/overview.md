@@ -1,8 +1,8 @@
 # Architecture Overview
 
-Current behavior version: `1.1.1`
+Current behavior version: `1.0.0`
 
-The system finds jobs, scores them, scans Gmail for updates, syncs the tracker, and reflects on outcomes to adjust strategy.
+The system finds jobs, scores them, optionally drafts versioned tailored resumes, scans Gmail for updates, syncs the tracker, and reflects on outcomes to adjust strategy.
 
 ## Workflows
 
@@ -16,6 +16,7 @@ The system finds jobs, scores them, scans Gmail for updates, syncs the tracker, 
 - `CoordinatorAgent` hands off to JobSearchAgent, TrackerAgent, GmailMonitorAgent and uses tools: none.
 - `GmailMonitorAgent` hands off to no specialists and uses tools: search_gmail_job_updates, classify_job_email, match_email_to_tracker, read_tracker_sheet, upsert_tracker_row.
 - `JobSearchAgent` hands off to no specialists and uses tools: search_jobs, score_job_fit.
+- `ResumeWriterAgent` hands off to no specialists and uses tools: none.
 - `TrackerAgent` hands off to no specialists and uses tools: read_tracker_sheet, upsert_tracker_row.
 
 ## Tool Surface

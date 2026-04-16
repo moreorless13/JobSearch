@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
+from datetime import date, datetime, timedelta
 from typing import Any, Literal, cast
+from zoneinfo import ZoneInfo
 
 import pydantic as pydantic_module
 
@@ -49,6 +52,12 @@ SOURCE_DISPLAY_NAMES = {
 REMOTE_VALUES = {"remote"}
 LOCAL_VALUES = {"local", "hybrid"}
 SEARCH_RETRY_ATTEMPTS = 2
+MONTREAL_TIMEZONE = ZoneInfo("America/Montreal")
+DAYS_PER_YEAR = 365.25
+EXPERIENCE_RANGE_PATTERN = re.compile(r"\b(\d+)\s*(?:-|to)\s*(\d+)\s+years?(?:\s+of)?\s+experience\b", re.IGNORECASE)
+EXPERIENCE_PLUS_PATTERN = re.compile(r"\b(\d+)\s*\+\s*years?(?:\s+of)?\s+experience\b", re.IGNORECASE)
+EXPERIENCE_MINIMUM_PATTERN = re.compile(r"\bminimum of\s+(\d+)\s+years?(?:\s+of)?\s+experience\b", re.IGNORECASE)
+EXPERIENCE_AT_LEAST_PATTERN = re.compile(r"\bat least\s+(\d+)\s+years?(?:\s+of)?\s+experience\b", re.IGNORECASE)
 
 
 class WebSearchJob(BaseModel):
@@ -135,12 +144,153 @@ def fit_band(score: int) -> str:
     return "ignore"
 
 
+def current_montreal_date() -> date:
+    return datetime.now(MONTREAL_TIMEZONE).date()
+
+
+def parse_iso_date(value: Any) -> date | None:
+    if value in (None, "", []):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value.split("T", 1)[0])
+    except ValueError:
+        return None
+
+
+def normalize_experience_years(value: Any) -> float | None:
+    if value in (None, "", []):
+        return None
+    try:
+        return round(float(value), 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def merge_date_ranges(ranges: list[tuple[date, date]]) -> list[tuple[date, date]]:
+    if not ranges:
+        return []
+
+    merged: list[tuple[date, date]] = []
+    for start, end in sorted(ranges, key=lambda item: (item[0], item[1])):
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+            continue
+        merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return merged
+
+
+def experience_years_from_ranges(ranges: list[tuple[date, date]]) -> float | None:
+    if not ranges:
+        return None
+    total_days = sum((end - start).days for start, end in merge_date_ranges(ranges))
+    return round(total_days / DAYS_PER_YEAR, 1)
+
+
+def build_experience_ranges(
+    work_history: list[dict[str, Any]],
+    *,
+    relevant_only: bool,
+    current_date: date | None = None,
+) -> list[tuple[date, date]]:
+    active_date = current_date or current_montreal_date()
+    ranges: list[tuple[date, date]] = []
+    for role in work_history:
+        if relevant_only and not bool(role.get("counts_toward_relevant_experience")):
+            continue
+
+        start_date = parse_iso_date(role.get("start_date"))
+        end_value = role.get("end_date")
+        end_date = parse_iso_date(end_value) or (active_date if end_value in (None, "", []) else None)
+        if start_date is None or end_date is None or end_date < start_date:
+            continue
+
+        # Convert inclusive source dates to half-open ranges so overlapping tenure counts once.
+        ranges.append((start_date, end_date + timedelta(days=1)))
+    return ranges
+
+
+def derive_candidate_experience_years(
+    candidate_profile: dict[str, Any],
+    *,
+    current_date: date | None = None,
+) -> float | None:
+    work_history = candidate_profile.get("work_history") or []
+    if not isinstance(work_history, list):
+        return None
+
+    relevant_ranges = build_experience_ranges(work_history, relevant_only=True, current_date=current_date)
+    if relevant_ranges:
+        return experience_years_from_ranges(relevant_ranges)
+
+    total_ranges = build_experience_ranges(work_history, relevant_only=False, current_date=current_date)
+    return experience_years_from_ranges(total_ranges)
+
+
+def parse_required_experience_years(text: str | None) -> float | None:
+    if not text:
+        return None
+
+    minimums: list[int] = []
+    minimums.extend(int(match.group(1)) for match in EXPERIENCE_PLUS_PATTERN.finditer(text))
+    minimums.extend(int(match.group(1)) for match in EXPERIENCE_RANGE_PATTERN.finditer(text))
+    minimums.extend(int(match.group(1)) for match in EXPERIENCE_MINIMUM_PATTERN.finditer(text))
+    minimums.extend(int(match.group(1)) for match in EXPERIENCE_AT_LEAST_PATTERN.finditer(text))
+    if not minimums:
+        return None
+    return float(max(minimums))
+
+
+def resolve_required_experience_years(job: dict[str, Any]) -> float | None:
+    explicit_value = normalize_experience_years(job.get("required_experience_years"))
+    if explicit_value is not None:
+        return explicit_value
+
+    description = job.get("description")
+    if not isinstance(description, str):
+        return None
+    return parse_required_experience_years(description)
+
+
+def experience_adjustment(
+    required_experience_years: float | None,
+    candidate_experience_years: float | None,
+) -> tuple[int, str]:
+    if required_experience_years is None:
+        return 0, "experience requirement not stated"
+    if required_experience_years <= 0:
+        return 12, "experience matches or exceeds the requirement"
+    if candidate_experience_years is None:
+        return 0, "candidate experience unavailable"
+
+    ratio = candidate_experience_years / required_experience_years
+    if ratio >= 1.0:
+        return 12, "experience matches or exceeds the requirement"
+    if ratio >= 0.85:
+        return 0, "experience is slightly below the requirement"
+    if ratio >= 0.60:
+        return -15, "experience is materially below the requirement"
+    return -25, "experience is materially below the requirement"
+
+
 def calculate_fit_score(job: dict[str, Any], candidate_profile: dict[str, Any]) -> dict[str, Any]:
     title = normalize_text(job.get("role_title"))
     company = job.get("company")
     keywords = {normalize_text(keyword) for keyword in candidate_profile.get("keywords", [])}
     target_roles = {normalize_text(role) for role in candidate_profile.get("target_roles", [])}
     industries = {normalize_text(industry) for industry in candidate_profile.get("target_industries", [])}
+    candidate_experience_years = derive_candidate_experience_years(candidate_profile)
+    required_experience_years = resolve_required_experience_years(job)
+    experience_gap_years = (
+        round(candidate_experience_years - required_experience_years, 1)
+        if candidate_experience_years is not None and required_experience_years is not None
+        else None
+    )
 
     title_score = 35 if any(target_role in title for target_role in target_roles if target_role) else 0
     keyword_hits = sum(1 for keyword in keywords if keyword and keyword in normalize_text(job.get("description", "")))
@@ -148,8 +298,9 @@ def calculate_fit_score(job: dict[str, Any], candidate_profile: dict[str, Any]) 
     industry_score = 12 if normalize_text(job.get("industry")) in industries else 0
     location_score = 15 if location_matches(job, candidate_profile) else 0
     salary_score = 10 if salary_meets_floor(job, candidate_profile["salary_floor"]) else 0
+    experience_score, experience_reason = experience_adjustment(required_experience_years, candidate_experience_years)
 
-    score = min(title_score + keyword_score + industry_score + location_score + salary_score, 100)
+    score = max(min(title_score + keyword_score + industry_score + location_score + salary_score + experience_score, 100), 0)
     reasons: list[str] = []
     if title_score:
         reasons.append("title aligns with target roles")
@@ -161,6 +312,7 @@ def calculate_fit_score(job: dict[str, Any], candidate_profile: dict[str, Any]) 
         reasons.append("location matches the candidate rules")
     if salary_score:
         reasons.append("salary meets or exceeds the floor")
+    reasons.append(experience_reason)
     if not reasons:
         reasons.append("weak alignment against the current profile")
 
@@ -170,6 +322,9 @@ def calculate_fit_score(job: dict[str, Any], candidate_profile: dict[str, Any]) 
         "fit_score": score,
         "fit_band": fit_band(score),
         "reason": "; ".join(reasons),
+        "required_experience_years": required_experience_years,
+        "candidate_experience_years": candidate_experience_years,
+        "experience_gap_years": experience_gap_years,
         "duplicate_key": job.get("duplicate_key")
         or build_duplicate_key(job.get("company"), job.get("role_title"), job.get("location")),
     }

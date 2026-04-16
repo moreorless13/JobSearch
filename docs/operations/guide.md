@@ -1,6 +1,6 @@
 # Operations Guide
 
-Current behavior version: `1.1.1`
+Current behavior version: `1.0.0`
 
 Run the preset workflows through `python app.py --workflow <daily|jobs|gmail|reflect>`.
 
@@ -17,6 +17,13 @@ Run the preset workflows through `python app.py --workflow <daily|jobs|gmail|ref
 - Flag threshold: `0.6`
 - LLM judge enabled: `False`
 - Duplicate company cooldown: `7` days
+
+## Resume Tailoring
+
+- Jobs marked `tailor_resume = yes` can generate versioned resume drafts during the `jobs` workflow.
+- Drafts are written under `output/doc/resumes/` and the generated `resume_version` is stored on the tracker row.
+- Resume reference documents configured: `True`
+- Resume generation failures are surfaced in `needs_review` as `resume_generation_unavailable` instead of silently skipping the issue.
 
 ## Documentation Refresh
 

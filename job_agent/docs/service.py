@@ -517,7 +517,7 @@ class DocumentationService:
         return (
             "# Architecture Overview\n\n"
             f"Current behavior version: `{behavior_version}`\n\n"
-            "The system finds jobs, scores them, scans Gmail for updates, syncs the tracker, and reflects on outcomes to adjust strategy.\n\n"
+            "The system finds jobs, scores them, optionally drafts versioned tailored resumes, scans Gmail for updates, syncs the tracker, and reflects on outcomes to adjust strategy.\n\n"
             "## Workflows\n\n"
             f"{workflow_lines}\n\n"
             "## Agent Graph\n\n"
@@ -531,6 +531,7 @@ class DocumentationService:
     def _render_operations(self, manifest: BehaviorManifest, behavior_version: str) -> str:
         decision_policy = manifest.decision_policy
         qa_policy = manifest.qa_policy
+        has_resume_references = bool(self.candidate_profile.get("resume_reference_documents"))
         return (
             "# Operations Guide\n\n"
             f"Current behavior version: `{behavior_version}`\n\n"
@@ -545,6 +546,11 @@ class DocumentationService:
             f"- Flag threshold: `{qa_policy.get('flag_threshold')}`\n"
             f"- LLM judge enabled: `{qa_policy.get('llm_judge_enabled')}`\n"
             f"- Duplicate company cooldown: `{qa_policy.get('duplicate_company_cooldown_days')}` days\n\n"
+            "## Resume Tailoring\n\n"
+            "- Jobs marked `tailor_resume = yes` can generate versioned resume drafts during the `jobs` workflow.\n"
+            "- Drafts are written under `output/doc/resumes/` and the generated `resume_version` is stored on the tracker row.\n"
+            f"- Resume reference documents configured: `{has_resume_references}`\n"
+            "- Resume generation failures are surfaced in `needs_review` as `resume_generation_unavailable` instead of silently skipping the issue.\n\n"
             "## Documentation Refresh\n\n"
             "- Preset workflows refresh documentation after completion.\n"
             "- Docs are rewritten only when content changes.\n"
@@ -553,6 +559,7 @@ class DocumentationService:
 
     def _render_developer(self, manifest: BehaviorManifest, behavior_version: str) -> str:
         prompt_lines = "\n".join(f"- `{name}`" for name in sorted(manifest.prompts))
+        schema_lines = "\n".join(f"- `{name}`" for name in sorted(manifest.schemas))
         return (
             "# Developer Guide\n\n"
             f"Current behavior version: `{behavior_version}`\n\n"
@@ -564,7 +571,9 @@ class DocumentationService:
             "- Patch versions cover documentation-only refreshes.\n\n"
             "## Working Surface\n\n"
             f"- Prompt files: \n{prompt_lines}\n"
-            "- Schemas live under `schemas/`.\n"
+            f"- Schemas live under `schemas/`:\n{schema_lines}\n"
+            "- `WorkflowOutput` is a public interface. Changes such as `resume_artifacts` should be treated as contract changes.\n"
+            "- Resume drafting behavior is split between `job_agent/resume.py`, `job_agent/agents/resume_writer.py`, and tracker sync in the orchestrator.\n"
             "- The explain path is available through `python app.py --explain \"<question>\"`.\n"
         )
 

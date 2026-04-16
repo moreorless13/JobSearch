@@ -2,8 +2,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from job_agent.models import JobRecord
 from job_agent.docs.models import BehaviorManifest, DocumentationEvent, DocumentationStateSnapshot
-from job_agent.orchestrator import decide_job_action, due_follow_up_datetime, reflect_strategy, tracker_due_follow_ups
+from job_agent.orchestrator import (
+    build_tracker_row_from_job,
+    decide_job_action,
+    due_follow_up_datetime,
+    reflect_strategy,
+    should_tailor_resume,
+    tracker_due_follow_ups,
+)
 from job_agent.state import (
     ACTIVE_GOAL_KEY,
     CURRENT_STRATEGY_KEY,
@@ -213,6 +221,45 @@ def test_decide_job_action_applies_thresholds_and_stale_skip() -> None:
 
     assert fresh_action[0] == "prioritize"
     assert stale_action[0] == "skip"
+
+
+def test_should_tailor_resume_returns_yes_for_fit_score_or_next_steps() -> None:
+    assert should_tailor_resume(fit_score=71, next_steps="Track and monitor for updates.") == "yes"
+    assert should_tailor_resume(
+        fit_score=60,
+        next_steps="Review quickly and decide whether to tailor the resume.",
+    ) == "yes"
+    assert should_tailor_resume(fit_score=60, next_steps="Track and monitor for updates.") == "no"
+
+
+def test_build_tracker_row_from_job_sets_tailor_resume_flag() -> None:
+    row = build_tracker_row_from_job(
+        job=JobRecord(
+            company="Acme",
+            role_title="Solutions Engineer",
+            location="Remote",
+            source="company_sites",
+            posting_url="https://example.com/jobs/1",
+            careers_url="https://example.com/careers/1",
+            salary="$100,000",
+            remote_or_local="remote",
+            fit_score=68,
+            match_summary="maybe",
+            required_experience_years=5.0,
+            candidate_experience_years=6.2,
+            experience_gap_years=1.2,
+            duplicate_key="acme::solutions engineer::remote",
+            reason="Worth a look",
+        ),
+        next_steps="Review quickly and decide whether to tailor the resume.",
+        resume_version="v1.0",
+    )
+
+    assert row["tailor_resume"] == "yes"
+    assert row["resume_version"] == "v1.0"
+    assert row["required_experience_years"] == 5.0
+    assert row["candidate_experience_years"] == 6.2
+    assert row["experience_gap_years"] == 1.2
 
 
 def test_tracker_due_follow_ups_waits_three_business_days() -> None:

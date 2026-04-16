@@ -11,6 +11,30 @@
   "company_priorities": {
     "example company": 0.2
   },
+  "resume_reference_documents": [
+    {
+      "label": "Solutions Engineer Resume (v1.0)",
+      "version": "v1.0",
+      "path": "/absolute/path/to/Solutions Engineer Resume.docx",
+      "kind": "resume",
+      "target_focus": "solutions engineer",
+      "notes": [
+        "Use this as the primary reference for client-facing API integration and implementation roles.",
+        "Preserve only verified experience and adapt wording to the target job."
+      ]
+    },
+    {
+      "label": "Product Engineer Resume (v1.0)",
+      "version": "v1.0",
+      "path": "/absolute/path/to/Product Engineer Resume.docx",
+      "kind": "resume",
+      "target_focus": "product engineer",
+      "notes": [
+        "Use this as the primary reference for product, platform, and technical delivery framing.",
+        "Prefer measurable outcomes, stakeholder coordination, QA, and platform upgrade work."
+      ]
+    }
+  ],
   "decision_thresholds": {
     "prioritize": 85,
     "track": 70,
@@ -63,6 +87,22 @@
     "TypeScript",
     "React",
     "JWT"
+  ],
+  "work_history": [
+    {
+      "company": "Acme",
+      "title": "Implementation Consultant",
+      "start_date": "2019-01-07",
+      "end_date": "2021-03-31",
+      "counts_toward_relevant_experience": true
+    },
+    {
+      "company": "Beta",
+      "title": "Solutions Engineer",
+      "start_date": "2021-04-01",
+      "end_date": null,
+      "counts_toward_relevant_experience": true
+    }
   ],
   "sheet_url": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit"
 }

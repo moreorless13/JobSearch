@@ -37,6 +37,12 @@ AGENT_SPECS: dict[str, dict[str, Any]] = {
             "upsert_tracker_row",
         ],
     },
+    "ResumeWriterAgent": {
+        "prompt_name": "resume_writer.txt",
+        "handoff_description": "Drafts versioned resume artifacts from the candidate profile, reference resumes, and target job details.",
+        "handoffs": [],
+        "tools": [],
+    },
 }
 
 

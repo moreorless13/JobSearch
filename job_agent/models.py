@@ -37,6 +37,9 @@ class JobRecord(BaseModel):
     remote_or_local: Literal["remote", "local", "hybrid", "unknown"] = "unknown"
     fit_score: int | None = None
     match_summary: str | None = None
+    required_experience_years: float | None = None
+    candidate_experience_years: float | None = None
+    experience_gap_years: float | None = None
     duplicate_key: str | None = None
     reason: str | None = None
 
@@ -58,6 +61,15 @@ class GmailUpdate(BaseModel):
     action: str | None = None
     matched_duplicate_key: str | None = None
     confidence: float | None = None
+
+
+class ResumeArtifact(BaseModel):
+    company: str | None = None
+    role_title: str | None = None
+    version: str
+    output_path: str
+    format: str = "markdown"
+    source_labels: list[str] = Field(default_factory=list)
 
 
 class ReviewItem(BaseModel):
@@ -92,6 +104,7 @@ class WorkflowOutput(BaseModel):
     summary: SummaryCounts = Field(default_factory=SummaryCounts)
     new_jobs: list[JobRecord] = Field(default_factory=list)
     gmail_updates: list[GmailUpdate] = Field(default_factory=list)
+    resume_artifacts: list[ResumeArtifact] = Field(default_factory=list)
     tracker_updates: list[TrackerUpdate] = Field(default_factory=list)
     qa_results: list[QAResult] = Field(default_factory=list)
     documentation_updates: list[DocumentationUpdate] = Field(default_factory=list)

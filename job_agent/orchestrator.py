@@ -8,8 +8,9 @@ from typing import Any
 
 from job_agent.docs.service import DocumentationService
 from job_agent.events import WorkflowEvent
-from job_agent.models import GmailUpdate, JobRecord, QAResult, ReviewItem, TrackerUpdate, WorkflowOutput
+from job_agent.models import GmailUpdate, JobRecord, QAResult, ResumeArtifact, ReviewItem, TrackerUpdate, WorkflowOutput
 from job_agent.qa import QAEventDispatcher
+from job_agent.resume import generate_resume_artifact_impl
 from job_agent.runtime import (
     DEFAULT_GMAIL_QUERIES,
     DEFAULT_SEARCH_SOURCES,
@@ -36,7 +37,7 @@ from job_agent.state import (
 from job_agent.tools.dedupe import build_duplicate_key, normalize_text
 from job_agent.tools.gmail import classify_email_payload, match_email_to_tracker_row_payload, search_gmail_job_updates_impl
 from job_agent.tools.jobs import score_job_fit_impl, search_jobs_impl
-from job_agent.tools.sheets import read_tracker_sheet_impl, upsert_tracker_row_impl
+from job_agent.tools.sheets import find_matching_row, read_tracker_sheet_impl, upsert_tracker_row_impl
 
 POSITIVE_SIGNAL_CLASSIFICATIONS = {"Recruiter Outreach", "Interview Request", "Assessment Request", "Offer"}
 IMMEDIATE_REVIEW_CLASSIFICATIONS = {"Interview Request", "Assessment Request", "Offer"}
@@ -94,6 +95,20 @@ def combine_reason(*parts: str | None) -> str | None:
     return " | ".join(values)
 
 
+def should_tailor_resume(*, fit_score: Any, next_steps: str | None) -> str:
+    try:
+        normalized_fit_score = int(fit_score) if fit_score is not None else 0
+    except (TypeError, ValueError):
+        normalized_fit_score = 0
+
+    normalized_next_steps = normalize_text(next_steps)
+    if normalized_fit_score > 70:
+        return "yes"
+    if normalized_next_steps == normalize_text("Review quickly and decide whether to tailor the resume."):
+        return "yes"
+    return "no"
+
+
 def append_review(output: WorkflowOutput, *, kind: str, reason: str, details: str | None = None, company: str | None = None, role_title: str | None = None) -> None:
     output.needs_review.append(
         ReviewItem(
@@ -125,12 +140,22 @@ def build_job_record(job: dict[str, Any], fit: dict[str, Any], decision_reason: 
         remote_or_local=job.get("remote_or_local", "unknown"),
         fit_score=fit.get("fit_score"),
         match_summary=fit.get("fit_band"),
+        required_experience_years=fit.get("required_experience_years"),
+        candidate_experience_years=fit.get("candidate_experience_years"),
+        experience_gap_years=fit.get("experience_gap_years"),
         duplicate_key=job.get("duplicate_key"),
         reason=reason,
     )
 
 
-def build_tracker_row_from_job(job: JobRecord, *, status: str = "New", next_steps: str | None = None, priority: str | None = None) -> dict[str, Any]:
+def build_tracker_row_from_job(
+    job: JobRecord,
+    *,
+    status: str = "New",
+    next_steps: str | None = None,
+    priority: str | None = None,
+    resume_version: str | None = None,
+) -> dict[str, Any]:
     return {
         "company": job.company,
         "role_title": job.role_title,
@@ -139,6 +164,10 @@ def build_tracker_row_from_job(job: JobRecord, *, status: str = "New", next_step
         "posting_url": job.posting_url,
         "careers_url": job.careers_url,
         "status": status,
+        "resume_version": resume_version,
+        "required_experience_years": job.required_experience_years,
+        "candidate_experience_years": job.candidate_experience_years,
+        "experience_gap_years": job.experience_gap_years,
         "fit_score": job.fit_score,
         "match_summary": job.match_summary,
         "salary": job.salary,
@@ -146,6 +175,7 @@ def build_tracker_row_from_job(job: JobRecord, *, status: str = "New", next_step
         "notes": job.reason,
         "duplicate_key": job.duplicate_key,
         "priority": priority or ("high" if (job.fit_score or 0) >= 85 else "normal"),
+        "tailor_resume": should_tailor_resume(fit_score=job.fit_score, next_steps=next_steps),
         "next_steps": next_steps,
     }
 
@@ -178,6 +208,7 @@ def build_tracker_row_from_email_update(
     location = (matched_row or {}).get("location")
     existing_status = (matched_row or {}).get("status")
     status = gmail_status_for_classification(classified_email["classification"], existing_status=existing_status)
+    next_steps = classified_email.get("action")
     note_lines = [
         f"Email update: {classified_email['classification']}",
         f"From: {message.get('from', '').strip()}",
@@ -195,7 +226,11 @@ def build_tracker_row_from_email_update(
         "status": status,
         "email_update_type": classified_email["classification"],
         "last_email_update": message.get("date") or message.get("subject"),
-        "next_steps": classified_email.get("action"),
+        "tailor_resume": should_tailor_resume(
+            fit_score=(matched_row or {}).get("fit_score"),
+            next_steps=next_steps,
+        ),
+        "next_steps": next_steps,
         "notes": "\n".join(line for line in note_lines if line),
         "duplicate_key": (matched_row or {}).get("duplicate_key") or build_duplicate_key(company, role_title, location),
     }
@@ -751,7 +786,7 @@ class JobSearchOrchestrator:
             role_title=role_title,
         )
 
-    def _sync_job_to_tracker(self, output: WorkflowOutput, job: JobRecord, *, action: str) -> None:
+    def _sync_job_to_tracker(self, output: WorkflowOutput, job: JobRecord, *, action: str, resume_version: str | None = None) -> None:
         if action not in {"prioritize", "track"}:
             return
         next_steps = "Review quickly and decide whether to tailor the resume." if action == "prioritize" else "Track and monitor for updates."
@@ -759,6 +794,7 @@ class JobSearchOrchestrator:
             job,
             next_steps=next_steps,
             priority="high" if action == "prioritize" else "normal",
+            resume_version=resume_version,
         )
         result = upsert_tracker_row_impl(
             sheet_url=self.candidate_profile["sheet_url"],
@@ -786,6 +822,75 @@ class JobSearchOrchestrator:
             role_title=job.role_title,
             duplicate_key=job.duplicate_key,
         )
+
+    def _maybe_generate_resume_artifact(
+        self,
+        output: WorkflowOutput,
+        *,
+        job: dict[str, Any],
+        record: JobRecord,
+        action: str,
+    ) -> str | None:
+        if not self.candidate_profile.get("resume_reference_documents"):
+            return None
+
+        next_steps = "Review quickly and decide whether to tailor the resume." if action == "prioritize" else "Track and monitor for updates."
+        if should_tailor_resume(fit_score=record.fit_score, next_steps=next_steps) != "yes":
+            return None
+
+        try:
+            result = generate_resume_artifact_impl(candidate_profile=self.candidate_profile, job=job)
+        except Exception as exc:
+            append_review(
+                output,
+                kind="resume_generation_unavailable",
+                reason="Resume tailoring was requested but the tailored resume could not be generated.",
+                details=str(exc),
+                company=record.company,
+                role_title=record.role_title,
+            )
+            return None
+        if not result.get("implemented", False):
+            append_review(
+                output,
+                kind="resume_generation_unavailable",
+                reason="Resume tailoring was requested but the tailored resume could not be generated.",
+                details=result.get("reason"),
+                company=record.company,
+                role_title=record.role_title,
+            )
+            return None
+
+        try:
+            artifact = ResumeArtifact.model_validate(result.get("artifact") or {})
+        except Exception as exc:
+            append_review(
+                output,
+                kind="resume_generation_unavailable",
+                reason="Resume tailoring returned an invalid artifact payload.",
+                details=str(exc),
+                company=record.company,
+                role_title=record.role_title,
+            )
+            return None
+        output.resume_artifacts.append(artifact)
+        return artifact.version
+
+    def _job_with_tracker_experience_overrides(
+        self,
+        job: dict[str, Any],
+        tracker_rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        existing_row = find_matching_row(tracker_rows, job, match_strategy="hybrid")
+        if existing_row is None:
+            return job
+
+        merged_job = dict(job)
+        for field in ("required_experience_years", "candidate_experience_years", "experience_gap_years"):
+            existing_value = existing_row.get(field)
+            if existing_value not in (None, "", []):
+                merged_job[field] = existing_value
+        return merged_job
 
     def run_jobs(self, *, refresh_docs: bool = True) -> WorkflowOutput:
         output = WorkflowOutput()
@@ -820,7 +925,8 @@ class JobSearchOrchestrator:
 
         kept_count = 0
         for job in search_result.get("jobs", []):
-            fit = score_job_fit_impl(job, self.candidate_profile)
+            scoring_job = self._job_with_tracker_experience_overrides(job, tracker_rows)
+            fit = score_job_fit_impl(scoring_job, self.candidate_profile)
             action, final_score, rationale, freshness_points, source_points, strategy_points, effort_points = decide_job_action(
                 job,
                 fit,
@@ -876,7 +982,13 @@ class JobSearchOrchestrator:
             if qa_result.verdict == "flag":
                 self._append_qa_review(output, qa_result=qa_result, company=record.company, role_title=record.role_title)
                 continue
-            self._sync_job_to_tracker(output, record, action=action)
+            resume_version = self._maybe_generate_resume_artifact(
+                output,
+                job=job,
+                record=record,
+                action=action,
+            )
+            self._sync_job_to_tracker(output, record, action=action, resume_version=resume_version)
 
         output.new_jobs.sort(key=lambda job: job.fit_score or 0, reverse=True)
         output.summary.jobs_added = kept_count

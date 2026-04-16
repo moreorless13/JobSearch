@@ -77,6 +77,12 @@ class FakeADCCredentials:
         self.signer_email = service_account_email
 
 
+class FakeLoadedImpersonatedADCCredentials(FakeADCCredentials):
+    def __init__(self, source_credentials: Any, service_account_email: str = "runner@example.com") -> None:
+        super().__init__(service_account_email=service_account_email)
+        self._source_credentials = source_credentials
+
+
 class FakeImpersonatedCredentials:
     def __init__(
         self,
@@ -160,19 +166,95 @@ def test_load_service_account_credentials_uses_adc_impersonation_for_delegation(
     assert credentials.subject == "delegate@example.com"
 
 
+def test_load_service_account_credentials_supports_adc_file_without_delegation(monkeypatch: Any) -> None:
+    sheets = load_sheets_module()
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def fake_load_credentials_from_file(filename: str, scopes: Iterable[Any]) -> tuple[Any, str]:
+        calls.append((filename, tuple(scopes)))
+        return FakeADCCredentials("runner@example.com"), "test-project"
+
+    monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_JSON", raising=False)
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_FILE", "/tmp/adc.json")
+    monkeypatch.delenv("GOOGLE_DELEGATED_USER", raising=False)
+    monkeypatch.delenv("GMAIL_DELEGATED_USER", raising=False)
+    monkeypatch.setattr(google_auth, "load_credentials_from_file", fake_load_credentials_from_file)
+
+    credentials = sheets.load_service_account_credentials()
+
+    assert isinstance(credentials, FakeADCCredentials)
+    assert calls == [("/tmp/adc.json", ("https://www.googleapis.com/auth/spreadsheets",))]
+
+
+def test_load_service_account_credentials_supports_impersonated_adc_file_for_delegation(monkeypatch: Any) -> None:
+    sheets = load_sheets_module()
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    nested_source_credentials = object()
+
+    def fake_load_credentials_from_file(filename: str, scopes: Iterable[Any]) -> tuple[Any, str]:
+        calls.append((filename, tuple(scopes)))
+        return FakeLoadedImpersonatedADCCredentials(
+            source_credentials=nested_source_credentials,
+            service_account_email="runner@example.com",
+        ), "test-project"
+
+    monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_JSON", raising=False)
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_FILE", "/tmp/adc.json")
+    monkeypatch.setenv("GOOGLE_DELEGATED_USER", "delegate@example.com")
+    monkeypatch.setattr(google_auth, "load_credentials_from_file", fake_load_credentials_from_file)
+    monkeypatch.setattr(impersonated_credentials, "Credentials", FakeImpersonatedCredentials)
+
+    credentials = cast(FakeImpersonatedCredentials, sheets.load_service_account_credentials())
+
+    assert calls == [
+        ("/tmp/adc.json", ("https://www.googleapis.com/auth/spreadsheets",)),
+        ("/tmp/adc.json", ("https://www.googleapis.com/auth/cloud-platform",)),
+    ]
+    assert credentials.source_credentials is nested_source_credentials
+    assert credentials.target_principal == "runner@example.com"
+    assert credentials.subject == "delegate@example.com"
+
+
 def test_resolve_header_mapping_understands_aliases() -> None:
     sheets = load_sheets_module()
-    mapping = sheets.resolve_header_mapping(["Company", "Title", "Notes", "Duplicate Key"])
+    mapping = sheets.resolve_header_mapping(["Company", "Title", "Tailor Resume", "Notes", "Duplicate Key"])
     assert mapping["company"] == 0
     assert mapping["role_title"] == 1
-    assert mapping["notes"] == 2
-    assert mapping["duplicate_key"] == 3
+    assert mapping["tailor_resume"] == 2
+    assert mapping["notes"] == 3
+    assert mapping["duplicate_key"] == 4
 
 
 def test_project_headers_adds_missing_canonical_columns() -> None:
     sheets = load_sheets_module()
     headers = sheets.project_headers(["Company", "Role Title"], {"company": "Acme", "posting_url": "https://example.com"})
     assert headers == ["Company", "Role Title", "Posting URL"]
+
+
+def test_project_headers_adds_tailor_resume_column() -> None:
+    sheets = load_sheets_module()
+    headers = sheets.project_headers(["Company", "Role Title"], {"company": "Acme", "tailor_resume": "yes"})
+    assert headers == ["Company", "Role Title", "Tailor Resume"]
+
+
+def test_project_headers_adds_experience_columns() -> None:
+    sheets = load_sheets_module()
+    headers = sheets.project_headers(
+        ["Company", "Role Title"],
+        {
+            "company": "Acme",
+            "required_experience_years": 5.0,
+            "candidate_experience_years": 6.2,
+            "experience_gap_years": 1.2,
+        },
+    )
+    assert headers == [
+        "Company",
+        "Role Title",
+        "Required Experience Years",
+        "Candidate Experience Years",
+        "Experience Gap Years",
+    ]
 
 
 def test_render_row_values_preserves_existing_notes() -> None:
@@ -281,6 +363,55 @@ def test_upsert_tracker_row_preserves_existing_status_when_update_defaults_to_ne
     assert result["status"] == "updated"
     assert result["row"]["status"] == "Interviewing"
     assert state["updates"][0]["body"]["values"][0][2] == "Interviewing"
+
+
+def test_upsert_tracker_row_preserves_existing_experience_values(monkeypatch: Any) -> None:
+    sheets = load_sheets_module()
+    state = {
+        "metadata": {
+            "properties": {"title": "Jobs"},
+            "sheets": [{"properties": {"title": "Tracker"}}],
+        },
+        "valueRanges": [
+            {
+                "values": [
+                    [
+                        "Company",
+                        "Role Title",
+                        "Required Experience Years",
+                        "Candidate Experience Years",
+                        "Experience Gap Years",
+                        "Duplicate Key",
+                    ],
+                    ["Acme", "Solutions Engineer", "6", "7.5", "1.5", "acme::solutions engineer::remote"],
+                ]
+            }
+        ],
+        "updates": [],
+        "appends": [],
+    }
+
+    monkeypatch.setattr("job_agent.tools.sheets.build_sheets_service", lambda: FakeSheetsService(state))
+
+    result = sheets.upsert_tracker_row_impl(
+        sheet_url="https://docs.google.com/spreadsheets/d/abc123/edit",
+        row={
+            "company": "Acme",
+            "role_title": "Solutions Engineer",
+            "required_experience_years": 4.0,
+            "candidate_experience_years": 5.0,
+            "experience_gap_years": 1.0,
+            "duplicate_key": "acme::solutions engineer::remote",
+        },
+        duplicate_key="acme::solutions engineer::remote",
+        match_strategy="hybrid",
+    )
+
+    assert result["implemented"] is True
+    assert result["row"]["required_experience_years"] == "6"
+    assert result["row"]["candidate_experience_years"] == "7.5"
+    assert result["row"]["experience_gap_years"] == "1.5"
+    assert state["updates"][0]["body"]["values"][0][2:5] == ["6", "7.5", "1.5"]
 
 
 def test_upsert_tracker_row_appends_and_extends_headers(monkeypatch: Any) -> None:

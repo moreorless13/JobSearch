@@ -13,6 +13,7 @@ def test_normalize_workflow_output_accepts_dict() -> None:
             },
             "new_jobs": [],
             "gmail_updates": [],
+            "resume_artifacts": [],
             "tracker_updates": [],
             "needs_review": [],
             "follow_up_questions": [],
@@ -27,7 +28,7 @@ def test_normalize_workflow_output_accepts_dict() -> None:
 
 def test_normalize_workflow_output_accepts_json_string() -> None:
     result = normalize_workflow_output(
-        '{"summary":{"jobs_reviewed":0,"jobs_added":0,"duplicates_skipped":0,"gmail_updates_processed":0,"tracker_rows_updated":0},"new_jobs":[],"gmail_updates":[],"tracker_updates":[],"needs_review":[],"follow_up_questions":[],"assistant_response":"No changes this run."}'
+        '{"summary":{"jobs_reviewed":0,"jobs_added":0,"duplicates_skipped":0,"gmail_updates_processed":0,"tracker_rows_updated":0},"new_jobs":[],"gmail_updates":[],"resume_artifacts":[],"tracker_updates":[],"needs_review":[],"follow_up_questions":[],"assistant_response":"No changes this run."}'
     )
 
     assert isinstance(result, WorkflowOutput)

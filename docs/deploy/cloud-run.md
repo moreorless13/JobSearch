@@ -12,6 +12,12 @@ If you want a request-driven API on Cloud Run services later, add an HTTP server
 - `GOOGLE_SERVICE_ACCOUNT_EMAIL` when delegated ADC cannot infer the runtime service account automatically
 - `REDIS_URL` if you want Redis-backed state instead of degraded stateless mode
 
+For the recommended Cloud Run setup, you do **not** need:
+
+- `GOOGLE_APPLICATION_CREDENTIALS`
+- `GOOGLE_SERVICE_ACCOUNT_FILE`
+- `GOOGLE_SERVICE_ACCOUNT_JSON`
+
 The current code uses:
 
 - Google Workspace domain-wide delegation in `job_agent/tools/gmail.py` and `job_agent/tools/sheets.py`
@@ -68,6 +74,8 @@ Notes:
 - Use `--args="--workflow","gmail"` for Gmail sync.
 - Use `--args="--workflow","reflect"` for strategy reflection.
 - If you do not want Redis yet, omit `REDIS_URL` and the app will run in degraded stateless mode.
+- Do not set `GOOGLE_APPLICATION_CREDENTIALS` on Cloud Run for the recommended keyless path.
+- Tailored resume drafts written under `output/doc/resumes/` live on the job's ephemeral filesystem unless you copy them to durable storage.
 
 ## Domain-Wide Delegation Notes
 
@@ -121,3 +129,4 @@ gcloud run jobs executions describe EXECUTION_NAME --region us-central1
 - Sheets can use the same delegated Workspace user as Gmail, but direct spreadsheet sharing with the service account still works as a fallback.
 - Redis requires a reachable managed endpoint; local Homebrew Redis is only for local development.
 - Keyless ADC is now the preferred Cloud Run auth path; mounted service-account keys are only a fallback.
+- Generated resume artifacts are local files. If you need durable retention in Cloud Run, publish them to Cloud Storage or another persistent destination.

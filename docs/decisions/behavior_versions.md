@@ -1,12 +1,10 @@
 # Behavior Versions
 
-Current behavior version: `1.1.1`
+Current behavior version: `1.0.0`
 
 ## Version History
 
-- `1.0.0` (initial) on 2026-03-25: Initial documentation baseline generated.
-- `1.1.0` (minor) on 2026-03-25: Updated agent handoffs or tool ownership in the orchestration graph. Adjusted QA policy for llm_override_env.
-- `1.1.1` (patch) on 2026-03-25: Documentation content changed without a behavior change.
+- `1.0.0` (initial) on 2026-04-15: Initial documentation baseline generated.
 
 ## Current Refresh
 

@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from job_agent.resume import normalize_resume_reference_documents
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 SCHEMAS_DIR = ROOT_DIR / "schemas"
 PROMPTS_DIR = ROOT_DIR / "prompts"
@@ -41,6 +43,8 @@ def load_candidate_profile() -> dict[str, Any]:
 
     profile.setdefault("top_level_objective", DEFAULT_TOP_LEVEL_OBJECTIVE)
     profile.setdefault("company_priorities", {})
+    profile.setdefault("resume_reference_documents", [])
+    profile["resume_reference_documents"] = normalize_resume_reference_documents(profile.get("resume_reference_documents"))
     profile["decision_thresholds"] = {
         **DEFAULT_DECISION_THRESHOLDS,
         **(profile.get("decision_thresholds") or {}),

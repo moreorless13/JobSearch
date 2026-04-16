@@ -37,6 +37,10 @@ PREFERRED_FIELD_ORDER = [
     "outcome",
     "resume_version",
     "cover_letter_version",
+    "tailor_resume",
+    "required_experience_years",
+    "candidate_experience_years",
+    "experience_gap_years",
     "fit_score",
     "match_summary",
     "salary",
@@ -67,6 +71,10 @@ CANONICAL_HEADER_LABELS = {
     "outcome": "Outcome",
     "resume_version": "Resume Version",
     "cover_letter_version": "Cover Letter Version",
+    "tailor_resume": "Tailor Resume",
+    "required_experience_years": "Required Experience Years",
+    "candidate_experience_years": "Candidate Experience Years",
+    "experience_gap_years": "Experience Gap Years",
     "fit_score": "Fit Score",
     "match_summary": "Match Summary",
     "salary": "Salary",
@@ -97,6 +105,10 @@ HEADER_ALIASES = {
     "outcome": ["outcome", "result"],
     "resume_version": ["resume version", "resume"],
     "cover_letter_version": ["cover letter version", "cover letter"],
+    "tailor_resume": ["tailor resume", "resume tailoring", "tailor?", "tailor decision"],
+    "required_experience_years": ["required experience years", "required years", "years required", "minimum experience"],
+    "candidate_experience_years": ["candidate experience years", "my experience years", "my years", "candidate years"],
+    "experience_gap_years": ["experience gap years", "experience gap", "years gap"],
     "fit_score": ["fit score", "score", "match score"],
     "match_summary": ["match summary", "fit summary", "summary"],
     "salary": ["salary", "compensation", "pay range"],
@@ -151,11 +163,18 @@ def rows_match(existing: dict[str, Any], candidate: dict[str, Any], match_strate
 
 def merge_tracker_rows(existing: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
     merged = deepcopy(existing)
+    protected_experience_fields = {
+        "required_experience_years",
+        "candidate_experience_years",
+        "experience_gap_years",
+    }
 
     for key, value in update.items():
         if key.startswith("__"):
             continue
         if value in (None, "", []):
+            continue
+        if key in protected_experience_fields and merged.get(key) not in (None, "", []):
             continue
         if key == "notes" and merged.get("notes"):
             merged["notes"] = f"{merged['notes']}\n{value}"

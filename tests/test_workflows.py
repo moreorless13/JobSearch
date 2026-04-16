@@ -28,6 +28,15 @@ PROFILE = {
     "target_roles": ["Solutions Engineer", "Integration Engineer"],
     "target_industries": ["FinTech", "SaaS"],
     "keywords": ["API", "integrations", "payments"],
+    "work_history": [
+        {
+            "company": "Acme",
+            "title": "Solutions Engineer",
+            "start_date": "2020-01-01",
+            "end_date": "2024-01-01",
+            "counts_toward_relevant_experience": True,
+        }
+    ],
     "sheet_url": "https://example.com/sheet",
     "qa": {
         "approve_threshold": 0.8,
@@ -123,6 +132,7 @@ def patch_docs_service(monkeypatch, tmp_path) -> None:
 
 def test_run_jobs_workflow_uses_decision_engine_and_tracker_sync(monkeypatch, tmp_path) -> None:
     store = FakeStateStore()
+    tracker_rows_written = []
     patch_store(monkeypatch, store)
     patch_docs_service(monkeypatch, tmp_path)
     monkeypatch.setattr("job_agent.orchestrator.read_tracker_sheet_impl", lambda _sheet_url: {"implemented": True, "rows": []})
@@ -165,10 +175,12 @@ def test_run_jobs_workflow_uses_decision_engine_and_tracker_sync(monkeypatch, tm
         return {"fit_score": 64, "fit_band": "maybe", "reason": "borderline fit"}
 
     monkeypatch.setattr("job_agent.orchestrator.score_job_fit_impl", fake_score_job_fit)
-    monkeypatch.setattr(
-        "job_agent.orchestrator.upsert_tracker_row_impl",
-        lambda **_kwargs: {"implemented": True, "status": "updated", "row": {"status": "New"}},
-    )
+
+    def fake_upsert_tracker_row(**kwargs):
+        tracker_rows_written.append(kwargs["row"])
+        return {"implemented": True, "status": "updated", "row": {"status": "New", **kwargs["row"]}}
+
+    monkeypatch.setattr("job_agent.orchestrator.upsert_tracker_row_impl", fake_upsert_tracker_row)
 
     result = run_jobs_workflow(PROFILE)
 
@@ -181,7 +193,72 @@ def test_run_jobs_workflow_uses_decision_engine_and_tracker_sync(monkeypatch, tm
     assert len(result.documentation_updates) == 5
     assert {decision.action for decision in store.decisions} == {"prioritize", "queue_review"}
     assert any(item.kind == "job_requires_review" for item in result.needs_review)
+    assert tracker_rows_written[0]["tailor_resume"] == "yes"
     assert isinstance(store.documentation_state, DocumentationStateSnapshot)
+
+
+def test_run_jobs_workflow_passes_tracker_experience_override_into_scoring(monkeypatch, tmp_path) -> None:
+    store = FakeStateStore()
+    seen_required_experience = []
+    patch_store(monkeypatch, store)
+    patch_docs_service(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "job_agent.orchestrator.read_tracker_sheet_impl",
+        lambda _sheet_url: {
+            "implemented": True,
+            "rows": [
+                {
+                    "company": "Acme",
+                    "role_title": "Solutions Engineer",
+                    "location": "Remote - US",
+                    "duplicate_key": "acme::solutions engineer::remote us",
+                    "required_experience_years": "6",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.search_jobs_impl",
+        lambda **_kwargs: {
+            "implemented": True,
+            "jobs": [
+                {
+                    "company": "Acme",
+                    "role_title": "Solutions Engineer",
+                    "location": "Remote - US",
+                    "source": "company_sites",
+                    "posting_url": "https://example.com/jobs/1",
+                    "careers_url": "https://example.com/careers/1",
+                    "remote_or_local": "remote",
+                    "posting_age_days": 3,
+                    "duplicate_key": "acme::solutions engineer::remote us",
+                }
+            ],
+            "summary": {"jobs_reviewed": 1, "duplicates_skipped": 0},
+            "notes": [],
+        },
+    )
+
+    def fake_score_job_fit(job, _candidate_profile):
+        seen_required_experience.append(job.get("required_experience_years"))
+        return {
+            "fit_score": 82,
+            "fit_band": "strong",
+            "reason": "strong fit",
+            "required_experience_years": 6.0,
+            "candidate_experience_years": 4.0,
+            "experience_gap_years": -2.0,
+        }
+
+    monkeypatch.setattr("job_agent.orchestrator.score_job_fit_impl", fake_score_job_fit)
+    monkeypatch.setattr(
+        "job_agent.orchestrator.upsert_tracker_row_impl",
+        lambda **kwargs: {"implemented": True, "status": "updated", "row": {"status": "New", **kwargs["row"]}},
+    )
+
+    run_jobs_workflow(PROFILE)
+
+    assert seen_required_experience == ["6"]
 
 def test_run_jobs_workflow_degrades_when_state_store_unavailable(monkeypatch, tmp_path) -> None:
     patch_store(monkeypatch, NullStateStore("redis unavailable"))
@@ -196,6 +273,78 @@ def test_run_jobs_workflow_degrades_when_state_store_unavailable(monkeypatch, tm
 
     assert any(item.kind == "state_store_unavailable" for item in result.needs_review)
     assert len(result.documentation_updates) == 5
+
+
+def test_run_jobs_workflow_generates_resume_artifact_for_tailored_jobs(monkeypatch, tmp_path) -> None:
+    store = FakeStateStore()
+    tracker_rows_written = []
+    profile = {
+        **PROFILE,
+        "resume_reference_documents": [
+            {
+                "label": "Solutions Engineer Resume",
+                "version": "v1.0",
+                "path": "/tmp/solutions.docx",
+                "kind": "resume",
+            }
+        ],
+    }
+    patch_store(monkeypatch, store)
+    patch_docs_service(monkeypatch, tmp_path)
+    monkeypatch.setattr("job_agent.orchestrator.read_tracker_sheet_impl", lambda _sheet_url: {"implemented": True, "rows": []})
+    monkeypatch.setattr(
+        "job_agent.orchestrator.search_jobs_impl",
+        lambda **_kwargs: {
+            "implemented": True,
+            "jobs": [
+                {
+                    "company": "Acme",
+                    "role_title": "Solutions Engineer",
+                    "location": "Remote - US",
+                    "source": "company_sites",
+                    "posting_url": "https://example.com/jobs/1",
+                    "careers_url": "https://example.com/careers/1",
+                    "remote_or_local": "remote",
+                    "posting_age_days": 3,
+                    "description": "Lead API integrations and customer onboarding.",
+                    "duplicate_key": "acme::solutions engineer::remote us",
+                }
+            ],
+            "summary": {"jobs_reviewed": 1, "duplicates_skipped": 0},
+            "notes": [],
+        },
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.score_job_fit_impl",
+        lambda *_args, **_kwargs: {"fit_score": 82, "fit_band": "strong", "reason": "strong fit"},
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.generate_resume_artifact_impl",
+        lambda **_kwargs: {
+            "implemented": True,
+            "artifact": {
+                "company": "Acme",
+                "role_title": "Solutions Engineer",
+                "version": "v1.0",
+                "output_path": str(tmp_path / "output" / "doc" / "resumes" / "acme__solutions-engineer__v1.0.md"),
+                "format": "markdown",
+                "source_labels": ["Solutions Engineer Resume (v1.0)"],
+            },
+        },
+    )
+
+    def fake_upsert_tracker_row(**kwargs):
+        tracker_rows_written.append(kwargs["row"])
+        return {"implemented": True, "status": "updated", "row": {"status": "New", **kwargs["row"]}}
+
+    monkeypatch.setattr("job_agent.orchestrator.upsert_tracker_row_impl", fake_upsert_tracker_row)
+
+    result = run_jobs_workflow(profile)
+
+    assert len(result.resume_artifacts) == 1
+    assert result.resume_artifacts[0].version == "v1.0"
+    assert tracker_rows_written[0]["resume_version"] == "v1.0"
+
 
 def test_run_gmail_workflow_records_outcomes_and_immediate_review(monkeypatch, tmp_path) -> None:
     store = FakeStateStore()
