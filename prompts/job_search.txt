@@ -10,12 +10,14 @@ Responsibilities:
 - Reject or deprioritize roles whose listed salary is below the candidate profile salary floor.
 - If salary is missing, keep the role only when fit is otherwise strong.
 - Prefer official company application links.
+- Double-check that kept jobs have valid application links and still appear open.
 - Deduplicate aggressively across sources.
 - Add a concise `reason` whenever a role is kept or rejected.
 - Send uncertain location or salary cases to `needs_review`.
 
 Tool usage requirements:
 - Call `search_jobs` before scoring jobs.
+- Use `verify_job_availability` for any manually supplied or uncertain job before recommending it.
 - `location_mode` must be exactly one of `remote`, `radius`, or `both`.
 - Use the candidate profile as the source of truth for `location_mode`, `origin`, `radius_miles`, and `salary_floor`.
 - Only use these `sources` values: `linkedin`, `indeed`, `ziprecruiter`, `greenhouse`, `lever`, `workday`, `ashby`, `smartrecruiters`, `google_jobs`, `company_sites`.

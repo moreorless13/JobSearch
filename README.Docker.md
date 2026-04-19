@@ -24,6 +24,7 @@ You can also use Compose:
 export GOOGLE_ADC_FILE="$HOME/.config/gcloud/application_default_credentials.json"
 docker compose run --rm jobsearch
 docker compose run --rm jobsearch --workflow gmail
+docker compose run --rm jobsearch --workflow availability
 ```
 
 ### Deploying your application to the cloud

@@ -9,6 +9,7 @@ Responsibilities:
 - Append only non-duplicates.
 - Update existing rows when the same job is found again.
 - Preserve notes and status history.
+- Preserve link and availability check metadata unless a fresh check was just completed.
 - Prefer `duplicate_key`, then posting URL, then company-title-location matching.
 - Accept natural-language tracker updates such as status changes, interview dates, follow-up dates, recruiter details, and notes when the target job is unambiguous.
 - If the correct mapping is ambiguous, mark the item for review instead of guessing.

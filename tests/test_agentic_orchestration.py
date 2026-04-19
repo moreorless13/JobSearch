@@ -6,10 +6,12 @@ from job_agent.models import JobRecord
 from job_agent.docs.models import BehaviorManifest, DocumentationEvent, DocumentationStateSnapshot
 from job_agent.orchestrator import (
     build_tracker_row_from_job,
+    build_tracker_row_from_availability_check,
     decide_job_action,
     due_follow_up_datetime,
     reflect_strategy,
     should_tailor_resume,
+    tracker_rows_due_for_availability_check,
     tracker_due_follow_ups,
 )
 from job_agent.state import (
@@ -279,6 +281,65 @@ def test_tracker_due_follow_ups_waits_three_business_days() -> None:
 
     assert len(tasks) == 1
     assert tasks[0].duplicate_key == "acme::solutions engineer::remote"
+
+
+def test_tracker_rows_due_for_availability_check_uses_three_day_interval() -> None:
+    reference = datetime(2026, 1, 10, tzinfo=UTC)
+    rows = [
+        {
+            "company": "DueCo",
+            "role_title": "Solutions Engineer",
+            "status": "New",
+            "posting_url": "https://example.com/jobs/due",
+            "availability_checked_at": "2026-01-06T00:00:00Z",
+            "duplicate_key": "dueco::solutions engineer::remote",
+        },
+        {
+            "company": "FreshCo",
+            "role_title": "Solutions Engineer",
+            "status": "New",
+            "posting_url": "https://example.com/jobs/fresh",
+            "availability_checked_at": "2026-01-08T00:00:00Z",
+            "duplicate_key": "freshco::solutions engineer::remote",
+        },
+        {
+            "company": "AppliedCo",
+            "role_title": "Solutions Engineer",
+            "status": "Applied",
+            "posting_url": "https://example.com/jobs/applied",
+            "availability_checked_at": "2026-01-01T00:00:00Z",
+            "duplicate_key": "appliedco::solutions engineer::remote",
+        },
+    ]
+
+    due = tracker_rows_due_for_availability_check(rows, reference=reference)
+
+    assert [row["company"] for row in due] == ["DueCo"]
+
+
+def test_build_tracker_row_from_availability_check_marks_unavailable_new_job() -> None:
+    row = {
+        "company": "Acme",
+        "role_title": "Solutions Engineer",
+        "location": "Remote",
+        "status": "New",
+        "posting_url": "https://example.com/jobs/1",
+        "duplicate_key": "acme::solutions engineer::remote",
+    }
+    check = {
+        "checked_url": "https://example.com/jobs/1",
+        "link_status": "valid",
+        "availability_status": "unavailable",
+        "checked_at": "2026-01-10T00:00:00Z",
+        "next_check_at": "2026-01-13T00:00:00Z",
+        "reason": "job is no longer available",
+    }
+
+    update = build_tracker_row_from_availability_check(row, check)
+
+    assert update["status"] == "Unavailable"
+    assert update["availability_next_check_at"] == "2026-01-13T00:00:00Z"
+    assert "job is no longer available" in update["notes"]
 
 
 def test_reflect_strategy_reweights_recent_positive_signals() -> None:

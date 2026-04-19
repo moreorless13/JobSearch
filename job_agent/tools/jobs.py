@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timedelta
+import socket
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 import pydantic as pydantic_module
 
 from job_agent.config import get_model_name
+from job_agent.runtime import AVAILABILITY_RECHECK_DAYS
 from job_agent.tools.dedupe import build_duplicate_key, dedupe_jobs, normalize_text
 from job_agent.tools._shared import resolve_function_tool
 
@@ -54,10 +59,25 @@ LOCAL_VALUES = {"local", "hybrid"}
 SEARCH_RETRY_ATTEMPTS = 2
 MONTREAL_TIMEZONE = ZoneInfo("America/Montreal")
 DAYS_PER_YEAR = 365.25
+JOB_LINK_CHECK_TIMEOUT_SECONDS = 10
 EXPERIENCE_RANGE_PATTERN = re.compile(r"\b(\d+)\s*(?:-|to)\s*(\d+)\s+years?(?:\s+of)?\s+experience\b", re.IGNORECASE)
 EXPERIENCE_PLUS_PATTERN = re.compile(r"\b(\d+)\s*\+\s*years?(?:\s+of)?\s+experience\b", re.IGNORECASE)
 EXPERIENCE_MINIMUM_PATTERN = re.compile(r"\bminimum of\s+(\d+)\s+years?(?:\s+of)?\s+experience\b", re.IGNORECASE)
 EXPERIENCE_AT_LEAST_PATTERN = re.compile(r"\bat least\s+(\d+)\s+years?(?:\s+of)?\s+experience\b", re.IGNORECASE)
+UNAVAILABLE_TEXT_MARKERS = (
+    "job is no longer available",
+    "job no longer available",
+    "position is no longer available",
+    "posting is no longer available",
+    "no longer accepting applications",
+    "this job has expired",
+    "job has expired",
+    "position has been filled",
+    "job has been filled",
+    "this position is closed",
+    "job is closed",
+    "posting closed",
+)
 
 
 class WebSearchJob(BaseModel):
@@ -82,6 +102,15 @@ class WebSearchJob(BaseModel):
 class WebSearchJobsResult(BaseModel):
     jobs: list[WebSearchJob] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+
+
+class JobAvailabilityCheckResult(BaseModel):
+    checked_url: str | None = None
+    link_status: Literal["valid", "invalid", "missing", "unknown"] = "unknown"
+    availability_status: Literal["available", "unavailable", "unknown"] = "unknown"
+    checked_at: str
+    next_check_at: str
+    reason: str | None = None
 
 
 def job_is_remote(job: dict[str, Any]) -> bool:
@@ -146,6 +175,11 @@ def fit_band(score: int) -> str:
 
 def current_montreal_date() -> date:
     return datetime.now(MONTREAL_TIMEZONE).date()
+
+
+def utc_timestamp(value: datetime | None = None) -> str:
+    current = value or datetime.now(UTC)
+    return current.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def parse_iso_date(value: Any) -> date | None:
@@ -450,6 +484,7 @@ def build_job_search_prompt(
         "Only include jobs whose title or responsibilities clearly align with the provided keywords.\n"
         "Return only real job postings, not blog posts or generic category pages.\n"
         "Prefer official company application URLs when available.\n"
+        "Only return jobs when the posting or application link appears valid and the role still appears open.\n"
         "For each job, provide a concise description, the best available posting URL, and a careers URL when discoverable.\n"
         "Include posted_at when the posting date is discoverable, otherwise leave it null. "
         "Also estimate posting_age_days when the source makes recency clear.\n"
@@ -504,6 +539,133 @@ def normalize_web_search_job(raw_job: WebSearchJob) -> dict[str, Any]:
     job["location"] = (job.get("location") or "").strip() or None
     job["duplicate_key"] = build_duplicate_key(job.get("company"), job.get("role_title"), job.get("location"))
     return job
+
+
+def select_job_check_url(job: dict[str, Any]) -> str | None:
+    for key in ("posting_url", "careers_url"):
+        value = job.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def url_has_http_scheme_and_host(url: str | None) -> bool:
+    if not url:
+        return False
+    parsed = urllib.parse.urlparse(url)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def infer_availability_from_html(body: str) -> tuple[str, str]:
+    normalized_body = normalize_text(body)
+    for marker in UNAVAILABLE_TEXT_MARKERS:
+        if marker in normalized_body:
+            return "unavailable", f"page contained closed-posting marker: {marker}"
+    return "available", "link loaded and no closed-posting marker was found"
+
+
+def check_url_availability(url: str, *, timeout: int = JOB_LINK_CHECK_TIMEOUT_SECONDS) -> tuple[str, str, str]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; JobSearchAgent/1.0; +https://example.com/jobsearch-agent)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status_code = int(getattr(response, "status", response.getcode()))
+            body = response.read(65536).decode("utf-8", errors="ignore")
+    except urllib.error.HTTPError as exc:
+        status_code = int(exc.code)
+        body = exc.read(65536).decode("utf-8", errors="ignore")
+        if status_code in {401, 403, 429}:
+            return "unknown", "unknown", f"link check was blocked with HTTP {status_code}"
+        if status_code in {404, 410}:
+            return "invalid", "unavailable", f"link returned HTTP {status_code}"
+        if body:
+            availability_status, reason = infer_availability_from_html(body)
+            if availability_status == "unavailable":
+                return "valid", "unavailable", reason
+        return "invalid", "unknown", f"link returned HTTP {status_code}"
+    except (TimeoutError, urllib.error.URLError, socket.timeout) as exc:
+        return "unknown", "unknown", f"link check could not complete: {exc}"
+
+    if 200 <= status_code < 400:
+        availability_status, reason = infer_availability_from_html(body)
+        return "valid", availability_status, reason
+    if status_code in {401, 403, 429}:
+        return "unknown", "unknown", f"link check was blocked with HTTP {status_code}"
+    if status_code in {404, 410}:
+        return "invalid", "unavailable", f"link returned HTTP {status_code}"
+    return "invalid", "unknown", f"link returned HTTP {status_code}"
+
+
+def verify_job_availability_impl(job: dict[str, Any]) -> dict[str, Any]:
+    checked_at = datetime.now(UTC).replace(microsecond=0)
+    next_check_at = checked_at + timedelta(days=AVAILABILITY_RECHECK_DAYS)
+    url = select_job_check_url(job)
+    if not url:
+        return JobAvailabilityCheckResult(
+            checked_url=None,
+            link_status="missing",
+            availability_status="unknown",
+            checked_at=utc_timestamp(checked_at),
+            next_check_at=utc_timestamp(next_check_at),
+            reason="job has no posting_url or careers_url to verify",
+        ).model_dump()
+
+    if not url_has_http_scheme_and_host(url):
+        return JobAvailabilityCheckResult(
+            checked_url=url,
+            link_status="invalid",
+            availability_status="unknown",
+            checked_at=utc_timestamp(checked_at),
+            next_check_at=utc_timestamp(next_check_at),
+            reason="job link is not a valid HTTP(S) URL",
+        ).model_dump()
+
+    link_status, availability_status, reason = check_url_availability(url)
+    return JobAvailabilityCheckResult(
+        checked_url=url,
+        link_status=cast(Any, link_status),
+        availability_status=cast(Any, availability_status),
+        checked_at=utc_timestamp(checked_at),
+        next_check_at=utc_timestamp(next_check_at),
+        reason=reason,
+    ).model_dump()
+
+
+def merge_availability_check(job: dict[str, Any], check: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(job)
+    merged["checked_url"] = check.get("checked_url")
+    merged["link_check_status"] = check.get("link_status")
+    merged["link_checked_at"] = check.get("checked_at")
+    merged["availability_status"] = check.get("availability_status")
+    merged["availability_checked_at"] = check.get("checked_at")
+    merged["availability_next_check_at"] = check.get("next_check_at")
+    merged["availability_notes"] = check.get("reason")
+    return merged
+
+
+def should_drop_for_availability(check: dict[str, Any]) -> bool:
+    return check.get("link_status") in {"missing", "invalid"} or check.get("availability_status") == "unavailable"
+
+
+def verify_search_result_jobs(jobs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    kept_jobs: list[dict[str, Any]] = []
+    dropped_jobs: list[dict[str, Any]] = []
+    for job in jobs:
+        check = verify_job_availability_impl(job)
+        checked_job = merge_availability_check(job, check)
+        if should_drop_for_availability(check):
+            dropped_jobs.append(
+                {
+                    "job": describe_job(job),
+                    "reasons": [str(check.get("reason") or "job link or availability check failed")],
+                }
+            )
+            continue
+        kept_jobs.append(checked_job)
+    return kept_jobs, dropped_jobs
 
 
 def post_process_search_results(
@@ -683,10 +845,21 @@ def search_jobs_impl(
             if jobs:
                 break
 
+        availability_dropped_jobs: list[dict[str, Any]] = []
+        if selected_jobs:
+            selected_jobs, availability_dropped_jobs = verify_search_result_jobs(selected_jobs)
+
         if attempt_count > 1 and selected_jobs:
             selected_notes.append(f"Recovered results after {attempt_count} search attempts.")
         elif attempt_count > 1 and not selected_jobs:
             selected_notes.append(f"No qualifying jobs were found after {attempt_count} search attempts.")
+
+        if availability_dropped_jobs:
+            selected_dropped_jobs = [*selected_dropped_jobs, *availability_dropped_jobs]
+            drop_summaries = ", ".join(
+                f"{item['job']} ({', '.join(item['reasons'])})" for item in availability_dropped_jobs[:5]
+            )
+            selected_notes.append(f"Filtered out jobs after link and availability checks: {drop_summaries}.")
 
         if not selected_jobs and selected_dropped_jobs:
             drop_summaries = ", ".join(
@@ -749,3 +922,9 @@ def search_jobs(
 def score_job_fit(job: dict[str, Any], candidate_profile: dict[str, Any]) -> dict[str, Any]:
     """Score a normalized job posting against the candidate profile."""
     return score_job_fit_impl(job, candidate_profile)
+
+
+@function_tool(strict_mode=False)
+def verify_job_availability(job: dict[str, Any]) -> dict[str, Any]:
+    """Check whether a job link is reachable and whether the posting still appears open."""
+    return verify_job_availability_impl(job)

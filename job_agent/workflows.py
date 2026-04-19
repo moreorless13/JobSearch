@@ -21,6 +21,10 @@ def run_reflect_workflow(candidate_profile: dict) -> WorkflowOutput:
     return JobSearchOrchestrator(candidate_profile).run_reflect()
 
 
+def run_availability_workflow(candidate_profile: dict) -> WorkflowOutput:
+    return JobSearchOrchestrator(candidate_profile).run_availability_checks()
+
+
 def run_backfill_resumes_workflow(candidate_profile: dict, *, overwrite_existing: bool = True) -> WorkflowOutput:
     return JobSearchOrchestrator(candidate_profile).backfill_tracker_resumes(overwrite_existing=overwrite_existing)
 
@@ -35,6 +39,7 @@ def run_backfill_materials_workflow(candidate_profile: dict, *, overwrite_existi
 
 WORKFLOW_RUNNERS: dict[str, WorkflowRunner] = {
     "jobs": lambda orchestrator: orchestrator.run_jobs(),
+    "availability": lambda orchestrator: orchestrator.run_availability_checks(),
     "gmail": lambda orchestrator: orchestrator.run_gmail(),
     "reflect": lambda orchestrator: orchestrator.run_reflect(),
     "daily": lambda orchestrator: orchestrator.run_daily(),

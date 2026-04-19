@@ -1,6 +1,6 @@
 # Cloud Run Deployment
 
-This repository is currently a CLI application, not an HTTP server. That makes **Cloud Run Jobs** the correct Google Cloud target for preset workflows such as `daily`, `jobs`, `gmail`, `reflect`, and the one-off material backfill workflows.
+This repository is currently a CLI application, not an HTTP server. That makes **Cloud Run Jobs** the correct Google Cloud target for preset workflows such as `daily`, `jobs`, `availability`, `gmail`, `reflect`, and the one-off material backfill workflows.
 
 If you want a request-driven API on Cloud Run services later, add an HTTP server layer first. In its current form, the container should run to completion and exit.
 
@@ -74,6 +74,7 @@ gcloud run jobs create jobsearch-daily \
 Notes:
 
 - Use `--args="--workflow","jobs"` for the job-search-only workflow.
+- Use `--args="--workflow","availability"` for the tracker link and availability recheck workflow. The `daily` workflow also runs this pass and only rechecks rows whose last availability check is at least 3 days old.
 - Use `--args="--workflow","gmail"` for Gmail sync.
 - Use `--args="--workflow","reflect"` for strategy reflection.
 - Use `--args="--workflow","backfill-materials"` for a one-off tracker pass that generates resumes and cover letters for existing rows.

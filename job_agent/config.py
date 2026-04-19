@@ -14,6 +14,7 @@ PROMPTS_DIR = ROOT_DIR / "prompts"
 DEFAULT_WORKFLOW_INPUTS = {
     "daily": "Run today's workflow: search jobs, update the tracker, scan Gmail, and summarize changes.",
     "jobs": "Search for new matching jobs, update the tracker, and summarize changes.",
+    "availability": "Recheck tracked job posting links and availability for rows due for verification.",
     "gmail": "Scan Gmail for job-related updates, sync the tracker, and summarize changes.",
     "reflect": "Review recent outcomes, update strategy weights, and summarize the changes.",
     "backfill-resumes": "Generate tailored resumes for existing tracker rows and write resume versions back to the tracker.",

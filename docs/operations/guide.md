@@ -2,14 +2,23 @@
 
 Current behavior version: `1.0.0`
 
-Run the preset workflows through `python app.py --workflow <daily|jobs|gmail|reflect|backfill-materials>`.
+Run the preset workflows through `python app.py --workflow <daily|jobs|availability|gmail|reflect|backfill-materials>`.
 
 ## Decision Rules
 
 - Salary floor: `65000`
 - Thresholds: `{'prioritize': 70, 'track': 50, 'queue_review': 60, 'stale_days': 21}`
 - Follow-up delay: `3` business days
+- Job availability recheck interval: `3` days
 - Search sources: `linkedin, indeed, ziprecruiter, greenhouse, lever, workday, ashby, smartrecruiters, google_jobs, company_sites`
+
+## Link And Availability Checks
+
+- Job intake checks posting URLs before tracker sync and filters out missing, invalid, or explicitly unavailable postings.
+- Tracked jobs with open tracker statuses are due for availability recheck every 3 days.
+- `python app.py --workflow availability` runs only the tracker availability pass.
+- `python app.py --workflow daily` runs availability checks automatically alongside search, Gmail, and reflection.
+- Rows store `Link Check Status`, `Availability Status`, `Availability Checked At`, and `Availability Next Check At` so the agent can avoid rechecking fresh rows.
 
 ## QA Gates
 

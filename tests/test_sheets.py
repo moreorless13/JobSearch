@@ -225,6 +225,30 @@ def test_resolve_header_mapping_understands_aliases() -> None:
     assert mapping["duplicate_key"] == 4
 
 
+def test_row_from_sheet_values_normalizes_blank_numeric_fields() -> None:
+    sheets = load_sheets_module()
+    row = sheets.row_from_sheet_values(
+        "Tracker",
+        [
+            "Company",
+            "Role Title",
+            "Fit Score",
+            "Required Experience Years",
+            "Candidate Experience Years",
+            "Experience Gap Years",
+        ],
+        ["Acme", "Solutions Engineer", "", " ", "", ""],
+        row_number=2,
+    )
+
+    assert row["fit_score"] is None
+    assert row["required_experience_years"] is None
+    assert row["candidate_experience_years"] is None
+    assert row["experience_gap_years"] is None
+    assert row["__raw_by_header"]["Fit Score"] == ""
+    assert row["__raw_by_header"]["Required Experience Years"] == " "
+
+
 def test_project_headers_adds_missing_canonical_columns() -> None:
     sheets = load_sheets_module()
     headers = sheets.project_headers(["Company", "Role Title"], {"company": "Acme", "posting_url": "https://example.com"})
@@ -254,6 +278,26 @@ def test_project_headers_adds_experience_columns() -> None:
         "Required Experience Years",
         "Candidate Experience Years",
         "Experience Gap Years",
+    ]
+
+
+def test_project_headers_adds_availability_columns() -> None:
+    sheets = load_sheets_module()
+    headers = sheets.project_headers(
+        ["Company", "Role Title"],
+        {
+            "company": "Acme",
+            "link_check_status": "valid",
+            "availability_status": "available",
+            "availability_next_check_at": "2026-01-04T00:00:00Z",
+        },
+    )
+    assert headers == [
+        "Company",
+        "Role Title",
+        "Link Check Status",
+        "Availability Status",
+        "Availability Next Check At",
     ]
 
 
@@ -412,6 +456,54 @@ def test_upsert_tracker_row_preserves_existing_experience_values(monkeypatch: An
     assert result["row"]["candidate_experience_years"] == "7.5"
     assert result["row"]["experience_gap_years"] == "1.5"
     assert state["updates"][0]["body"]["values"][0][2:5] == ["6", "7.5", "1.5"]
+
+
+def test_upsert_tracker_row_tolerates_blank_legacy_numeric_fields(monkeypatch: Any) -> None:
+    sheets = load_sheets_module()
+    state = {
+        "metadata": {
+            "properties": {"title": "Jobs"},
+            "sheets": [{"properties": {"title": "Tracker"}}],
+        },
+        "valueRanges": [
+            {
+                "values": [
+                    [
+                        "Company",
+                        "Role Title",
+                        "Fit Score",
+                        "Required Experience Years",
+                        "Candidate Experience Years",
+                        "Experience Gap Years",
+                        "Duplicate Key",
+                    ],
+                    ["Acme", "Solutions Engineer", "", "", "", "", "acme::solutions engineer::remote"],
+                ]
+            }
+        ],
+        "updates": [],
+        "appends": [],
+    }
+
+    monkeypatch.setattr("job_agent.tools.sheets.build_sheets_service", lambda: FakeSheetsService(state))
+
+    result = sheets.upsert_tracker_row_impl(
+        sheet_url="https://docs.google.com/spreadsheets/d/abc123/edit",
+        row={
+            "company": "Acme",
+            "role_title": "Solutions Engineer",
+            "notes": "new note",
+            "duplicate_key": "acme::solutions engineer::remote",
+        },
+        duplicate_key="acme::solutions engineer::remote",
+        match_strategy="hybrid",
+    )
+
+    assert result["implemented"] is True
+    assert result["row"]["fit_score"] is None
+    assert result["row"]["required_experience_years"] is None
+    row_update = next(update for update in state["updates"] if update["range"] != "'Tracker'!1:1")
+    assert row_update["body"]["values"][0][2:6] == ["", "", "", ""]
 
 
 def test_upsert_tracker_row_appends_and_extends_headers(monkeypatch: Any) -> None:

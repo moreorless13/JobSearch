@@ -34,6 +34,8 @@ Implemented today:
 - Free-form coordinator runs support `assistant_response` and follow-up questions
 - Free-form runs automatically answer coordinator follow-up questions with `yes` until the coordinator proceeds or a safety limit is reached
 - Search retries once when the first filtered pass returns no jobs
+- Job intake verifies posting links and filters out invalid or closed roles before tracker sync
+- Tracked job availability is rechecked every 3 days through the `availability` workflow and the daily workflow
 - Tracker sync only writes jobs that clear deterministic decision thresholds
 - Jobs added to the tracker and configured with `resume_reference_documents` generate versioned resume drafts under `output/doc/resumes/`, cover letters under `output/doc/cover_letters/`, and store both generated versions on the tracker row
 - Local helper logic for dedupe, location filtering, fit scoring, and email classification is implemented and tested
@@ -145,11 +147,14 @@ Examples:
 ```bash
 python app.py --workflow jobs
 python app.py --workflow daily
+python app.py --workflow availability
 python app.py --workflow gmail
 python app.py --workflow reflect
 python app.py --workflow backfill-materials
 python app.py --input "Search for new matching jobs and update my tracker."
 ```
+
+Use `availability` for the tracker hygiene pass that rechecks due posting links and marks rows when jobs disappear. The `daily` workflow runs this automatically, and each row becomes due again 3 days after its last availability check.
 
 Use `backfill-materials` for the one-off tracker pass that generates a fresh tailored resume and cover letter for existing tracker rows. `backfill-resumes` and `backfill-cover-letters` run each side independently.
 

@@ -8,6 +8,7 @@ from job_agent.tools.jobs import (
     normalize_source_name,
     post_process_search_results,
     search_jobs_impl,
+    verify_search_result_jobs,
 )
 
 
@@ -157,6 +158,17 @@ def test_search_jobs_impl_retries_after_empty_first_pass(monkeypatch) -> None:
     ]
 
     monkeypatch.setattr("job_agent.tools.jobs.perform_web_search_job_lookup", lambda **_kwargs: responses.pop(0))
+    monkeypatch.setattr(
+        "job_agent.tools.jobs.verify_job_availability_impl",
+        lambda _job: {
+            "checked_url": "https://www.linkedin.com/jobs/view/123",
+            "link_status": "valid",
+            "availability_status": "available",
+            "checked_at": "2026-01-01T00:00:00Z",
+            "next_check_at": "2026-01-04T00:00:00Z",
+            "reason": "test",
+        },
+    )
 
     result = search_jobs_impl(
         keywords=["Solutions Engineer", "API", "integrations"],
@@ -171,3 +183,38 @@ def test_search_jobs_impl_retries_after_empty_first_pass(monkeypatch) -> None:
     assert result["summary"]["jobs_returned"] == 1
     assert result["diagnostics"]["attempts"] == 2
     assert "Recovered results after 2 search attempts." in result["notes"]
+
+
+def test_verify_search_result_jobs_drops_invalid_or_closed_jobs(monkeypatch) -> None:
+    checks = {
+        "Acme": {
+            "checked_url": "https://example.com/jobs/1",
+            "link_status": "valid",
+            "availability_status": "available",
+            "checked_at": "2026-01-01T00:00:00Z",
+            "next_check_at": "2026-01-04T00:00:00Z",
+            "reason": "open",
+        },
+        "ClosedCo": {
+            "checked_url": "https://example.com/jobs/closed",
+            "link_status": "valid",
+            "availability_status": "unavailable",
+            "checked_at": "2026-01-01T00:00:00Z",
+            "next_check_at": "2026-01-04T00:00:00Z",
+            "reason": "job is no longer available",
+        },
+    }
+
+    monkeypatch.setattr("job_agent.tools.jobs.verify_job_availability_impl", lambda job: checks[job["company"]])
+
+    kept, dropped = verify_search_result_jobs(
+        [
+            {"company": "Acme", "role_title": "Solutions Engineer", "location": "Remote", "posting_url": "https://example.com/jobs/1"},
+            {"company": "ClosedCo", "role_title": "Solutions Engineer", "location": "Remote", "posting_url": "https://example.com/jobs/closed"},
+        ]
+    )
+
+    assert len(kept) == 1
+    assert kept[0]["availability_status"] == "available"
+    assert len(dropped) == 1
+    assert dropped[0]["job"] == "ClosedCo / Solutions Engineer / Remote"

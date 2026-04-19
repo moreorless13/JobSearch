@@ -18,6 +18,12 @@ function_tool = resolve_function_tool()
 
 DEFAULT_MATCH_STRATEGY = "hybrid"
 GOOGLE_SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+TRACKER_NUMERIC_FIELDS = {
+    "fit_score",
+    "required_experience_years",
+    "candidate_experience_years",
+    "experience_gap_years",
+}
 
 PREFERRED_FIELD_ORDER = [
     "date_added",
@@ -41,6 +47,13 @@ PREFERRED_FIELD_ORDER = [
     "required_experience_years",
     "candidate_experience_years",
     "experience_gap_years",
+    "checked_url",
+    "link_check_status",
+    "link_checked_at",
+    "availability_status",
+    "availability_checked_at",
+    "availability_next_check_at",
+    "availability_notes",
     "fit_score",
     "match_summary",
     "salary",
@@ -75,6 +88,13 @@ CANONICAL_HEADER_LABELS = {
     "required_experience_years": "Required Experience Years",
     "candidate_experience_years": "Candidate Experience Years",
     "experience_gap_years": "Experience Gap Years",
+    "checked_url": "Checked URL",
+    "link_check_status": "Link Check Status",
+    "link_checked_at": "Link Checked At",
+    "availability_status": "Availability Status",
+    "availability_checked_at": "Availability Checked At",
+    "availability_next_check_at": "Availability Next Check At",
+    "availability_notes": "Availability Notes",
     "fit_score": "Fit Score",
     "match_summary": "Match Summary",
     "salary": "Salary",
@@ -109,6 +129,13 @@ HEADER_ALIASES = {
     "required_experience_years": ["required experience years", "required years", "years required", "minimum experience"],
     "candidate_experience_years": ["candidate experience years", "my experience years", "my years", "candidate years"],
     "experience_gap_years": ["experience gap years", "experience gap", "years gap"],
+    "checked_url": ["checked url", "verified url", "verified link"],
+    "link_check_status": ["link check status", "link status", "url status"],
+    "link_checked_at": ["link checked at", "link last checked", "url checked at"],
+    "availability_status": ["availability status", "job availability", "job status check", "posting availability"],
+    "availability_checked_at": ["availability checked at", "availability last checked", "job last checked"],
+    "availability_next_check_at": ["availability next check at", "next availability check", "job next check"],
+    "availability_notes": ["availability notes", "availability reason", "link check notes"],
     "fit_score": ["fit score", "score", "match score"],
     "match_summary": ["match summary", "fit summary", "summary"],
     "salary": ["salary", "compensation", "pay range"],
@@ -138,6 +165,16 @@ def infer_duplicate_key(row: dict[str, Any]) -> str:
         row.get("role_title"),
         row.get("location"),
     )
+
+
+def is_blank_value(value: Any) -> bool:
+    return value is None or value == [] or (isinstance(value, str) and not value.strip())
+
+
+def normalize_sheet_cell_value(field: str, value: Any) -> Any:
+    if field in TRACKER_NUMERIC_FIELDS and is_blank_value(value):
+        return None
+    return value
 
 
 def rows_match(existing: dict[str, Any], candidate: dict[str, Any], match_strategy: str = DEFAULT_MATCH_STRATEGY) -> bool:
@@ -172,9 +209,9 @@ def merge_tracker_rows(existing: dict[str, Any], update: dict[str, Any]) -> dict
     for key, value in update.items():
         if key.startswith("__"):
             continue
-        if value in (None, "", []):
+        if is_blank_value(value):
             continue
-        if key in protected_experience_fields and merged.get(key) not in (None, "", []):
+        if key in protected_experience_fields and not is_blank_value(merged.get(key)):
             continue
         if key == "notes" and merged.get("notes"):
             merged["notes"] = f"{merged['notes']}\n{value}"
@@ -259,7 +296,7 @@ def row_from_sheet_values(sheet_name: str, headers: list[str], values: list[str]
     raw_by_header = {header: values[index] if index < len(values) else "" for index, header in enumerate(headers)}
     mapping = resolve_header_mapping(headers)
     row: dict[str, Any] = {
-        canonical: values[index] if index < len(values) else ""
+        canonical: normalize_sheet_cell_value(canonical, values[index] if index < len(values) else "")
         for canonical, index in mapping.items()
     }
     row["duplicate_key"] = infer_duplicate_key(row)
@@ -275,7 +312,7 @@ def project_headers(existing_headers: list[str], row: dict[str, Any]) -> list[st
 
     if not headers:
         for field in PREFERRED_FIELD_ORDER:
-            if row.get(field) not in (None, "", []):
+            if not is_blank_value(row.get(field)):
                 headers.append(preferred_header_for_field(field))
         if not headers:
             headers = [preferred_header_for_field("company"), preferred_header_for_field("role_title"), preferred_header_for_field("status")]
@@ -284,7 +321,7 @@ def project_headers(existing_headers: list[str], row: dict[str, Any]) -> list[st
     for field in PREFERRED_FIELD_ORDER:
         if field in mapping:
             continue
-        if row.get(field) in (None, "", []):
+        if is_blank_value(row.get(field)):
             continue
         headers.append(preferred_header_for_field(field))
 
@@ -298,7 +335,7 @@ def render_row_values(headers: list[str], row: dict[str, Any], existing_row: dic
 
     mapping = resolve_header_mapping(headers)
     for field, value in row.items():
-        if field.startswith("__") or value in (None, "", []):
+        if field.startswith("__") or is_blank_value(value):
             continue
         header = headers[mapping[field]] if field in mapping else preferred_header_for_field(field)
         raw_by_header[header] = serialize_cell_value(value)

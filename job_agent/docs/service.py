@@ -30,7 +30,7 @@ from job_agent.docs.models import (
     ExplanationCitation,
 )
 from job_agent.models import WorkflowOutput
-from job_agent.runtime import DEFAULT_GMAIL_QUERIES, DEFAULT_SEARCH_SOURCES, FOLLOW_UP_DAYS, STALE_POSTING_DAYS
+from job_agent.runtime import AVAILABILITY_RECHECK_DAYS, DEFAULT_GMAIL_QUERIES, DEFAULT_SEARCH_SOURCES, FOLLOW_UP_DAYS, STALE_POSTING_DAYS
 from job_agent.state import StateStore, isoformat, utc_now
 from job_agent.tools.dedupe import normalize_text
 
@@ -261,7 +261,7 @@ class DocumentationService:
         workflows = {
             name: {
                 "prompt": prompt,
-                "supports_tracker": name in {"jobs", "gmail", "daily"},
+                "supports_tracker": name in {"jobs", "availability", "gmail", "daily"},
                 "supports_reflection": name in {"reflect", "daily"},
             }
             for name, prompt in DEFAULT_WORKFLOW_INPUTS.items()
@@ -276,6 +276,7 @@ class DocumentationService:
             "gmail_queries": list(DEFAULT_GMAIL_QUERIES),
             "stale_posting_days": STALE_POSTING_DAYS,
             "follow_up_days": FOLLOW_UP_DAYS,
+            "availability_recheck_days": AVAILABILITY_RECHECK_DAYS,
             "salary_floor": self.candidate_profile.get("salary_floor"),
         }
         qa_policy = {
@@ -550,12 +551,19 @@ class DocumentationService:
         return (
             "# Operations Guide\n\n"
             f"Current behavior version: `{behavior_version}`\n\n"
-            "Run the preset workflows through `python app.py --workflow <daily|jobs|gmail|reflect|backfill-materials>`.\n\n"
+            "Run the preset workflows through `python app.py --workflow <daily|jobs|availability|gmail|reflect|backfill-materials>`.\n\n"
             "## Decision Rules\n\n"
             f"- Salary floor: `{decision_policy.get('salary_floor')}`\n"
             f"- Thresholds: `{decision_policy.get('thresholds')}`\n"
             f"- Follow-up delay: `{decision_policy.get('follow_up_days')}` business days\n"
+            f"- Job availability recheck interval: `{decision_policy.get('availability_recheck_days')}` days\n"
             f"- Search sources: `{', '.join(decision_policy.get('search_sources', []))}`\n\n"
+            "## Link And Availability Checks\n\n"
+            "- Job intake checks posting URLs before tracker sync and filters out missing, invalid, or explicitly unavailable postings.\n"
+            "- Tracked jobs with open tracker statuses are due for availability recheck every 3 days.\n"
+            "- `python app.py --workflow availability` runs only the tracker availability pass.\n"
+            "- `python app.py --workflow daily` runs availability checks automatically alongside search, Gmail, and reflection.\n"
+            "- Rows store `Link Check Status`, `Availability Status`, `Availability Checked At`, and `Availability Next Check At` so the agent can avoid rechecking fresh rows.\n\n"
             "## QA Gates\n\n"
             f"- Approve threshold: `{qa_policy.get('approve_threshold')}`\n"
             f"- Flag threshold: `{qa_policy.get('flag_threshold')}`\n"
@@ -754,8 +762,8 @@ class ExplainService:
         manifest = self.documentation_service.build_manifest()
         workflows = ", ".join(sorted(manifest.workflows))
         answer = (
-            "The system runs preset workflows for daily orchestration, targeted job search, Gmail sync, reflection, and one-off material backfills. "
-            f"`{workflows}` cover job intake, Gmail monitoring, tracker sync, and reflection. "
+            "The system runs preset workflows for daily orchestration, targeted job search, link and availability checks, Gmail sync, reflection, and one-off material backfills. "
+            f"`{workflows}` cover job intake, posting verification, Gmail monitoring, tracker sync, and reflection. "
             "Jobs are scored against the candidate profile, QA can block unsafe actions, and documentation refresh runs after preset workflows."
         )
         return ExplainResponse(

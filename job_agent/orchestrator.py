@@ -12,6 +12,7 @@ from job_agent.models import CoverLetterArtifact, GmailUpdate, JobRecord, QAResu
 from job_agent.qa import QAEventDispatcher
 from job_agent.resume import generate_cover_letter_artifact_impl, generate_resume_artifact_impl
 from job_agent.runtime import (
+    AVAILABILITY_RECHECK_DAYS,
     DEFAULT_GMAIL_QUERIES,
     DEFAULT_SEARCH_SOURCES,
     FOLLOW_UP_DAYS,
@@ -36,12 +37,25 @@ from job_agent.state import (
 )
 from job_agent.tools.dedupe import build_duplicate_key, normalize_text
 from job_agent.tools.gmail import classify_email_payload, match_email_to_tracker_row_payload, search_gmail_job_updates_impl
-from job_agent.tools.jobs import score_job_fit_impl, search_jobs_impl
+from job_agent.tools.jobs import score_job_fit_impl, search_jobs_impl, verify_job_availability_impl
 from job_agent.tools.sheets import find_matching_row, read_tracker_sheet_impl, upsert_tracker_row_impl
 
 POSITIVE_SIGNAL_CLASSIFICATIONS = {"Recruiter Outreach", "Interview Request", "Assessment Request", "Offer"}
 IMMEDIATE_REVIEW_CLASSIFICATIONS = {"Interview Request", "Assessment Request", "Offer"}
 REFLECTION_LOOKBACK_DAYS = 14
+AVAILABILITY_RECHECK_SKIP_STATUSES = {
+    "applied",
+    "assessment requested",
+    "interview requested",
+    "interviewing",
+    "offer",
+    "rejected",
+    "withdrawn",
+    "unavailable",
+    "link invalid",
+}
+AVAILABILITY_STATUS_UPDATE_STATUSES = {"", "new", "needs review", "tracked"}
+TRACKER_MATERIAL_ACTIONS = {"prioritize", "track", "queue_review"}
 
 
 def dedupe_list(values: list[str]) -> list[str]:
@@ -129,11 +143,18 @@ def build_job_record(job: dict[str, Any], fit: dict[str, Any], decision_reason: 
         careers_url=job.get("careers_url"),
         salary=salary,
         remote_or_local=job.get("remote_or_local", "unknown"),
-        fit_score=fit.get("fit_score"),
+        fit_score=optional_int(fit.get("fit_score")),
         match_summary=fit.get("fit_band"),
-        required_experience_years=fit.get("required_experience_years"),
-        candidate_experience_years=fit.get("candidate_experience_years"),
-        experience_gap_years=fit.get("experience_gap_years"),
+        required_experience_years=optional_float(fit.get("required_experience_years")),
+        candidate_experience_years=optional_float(fit.get("candidate_experience_years")),
+        experience_gap_years=optional_float(fit.get("experience_gap_years")),
+        checked_url=job.get("checked_url"),
+        link_check_status=job.get("link_check_status"),
+        link_checked_at=job.get("link_checked_at"),
+        availability_status=job.get("availability_status"),
+        availability_checked_at=job.get("availability_checked_at"),
+        availability_next_check_at=job.get("availability_next_check_at"),
+        availability_notes=job.get("availability_notes"),
         duplicate_key=job.get("duplicate_key"),
         reason=reason,
     )
@@ -161,6 +182,13 @@ def build_tracker_row_from_job(
         "required_experience_years": job.required_experience_years,
         "candidate_experience_years": job.candidate_experience_years,
         "experience_gap_years": job.experience_gap_years,
+        "checked_url": job.checked_url,
+        "link_check_status": job.link_check_status,
+        "link_checked_at": job.link_checked_at,
+        "availability_status": job.availability_status,
+        "availability_checked_at": job.availability_checked_at,
+        "availability_next_check_at": job.availability_next_check_at,
+        "availability_notes": job.availability_notes,
         "fit_score": job.fit_score,
         "match_summary": job.match_summary,
         "salary": job.salary,
@@ -180,6 +208,37 @@ def normalize_remote_or_local_value(value: Any) -> str:
     return "unknown"
 
 
+def blank_to_none(value: Any) -> Any:
+    if value is None or value == []:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
+def optional_int(value: Any) -> int | None:
+    normalized = blank_to_none(value)
+    if normalized is None:
+        return None
+    try:
+        return int(normalized)
+    except (TypeError, ValueError):
+        try:
+            return int(float(normalized))
+        except (TypeError, ValueError):
+            return None
+
+
+def optional_float(value: Any) -> float | None:
+    normalized = blank_to_none(value)
+    if normalized is None:
+        return None
+    try:
+        return float(normalized)
+    except (TypeError, ValueError):
+        return None
+
+
 def tracker_row_to_job_payload(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "company": row.get("company"),
@@ -191,11 +250,18 @@ def tracker_row_to_job_payload(row: dict[str, Any]) -> dict[str, Any]:
         "remote_or_local": normalize_remote_or_local_value(row.get("remote_or_local")),
         "salary": row.get("salary"),
         "description": row.get("notes") or row.get("match_summary"),
-        "fit_score": row.get("fit_score"),
+        "fit_score": optional_int(row.get("fit_score")),
         "match_summary": row.get("match_summary"),
-        "required_experience_years": row.get("required_experience_years"),
-        "candidate_experience_years": row.get("candidate_experience_years"),
-        "experience_gap_years": row.get("experience_gap_years"),
+        "required_experience_years": optional_float(row.get("required_experience_years")),
+        "candidate_experience_years": optional_float(row.get("candidate_experience_years")),
+        "experience_gap_years": optional_float(row.get("experience_gap_years")),
+        "checked_url": row.get("checked_url"),
+        "link_check_status": row.get("link_check_status"),
+        "link_checked_at": row.get("link_checked_at"),
+        "availability_status": row.get("availability_status"),
+        "availability_checked_at": row.get("availability_checked_at"),
+        "availability_next_check_at": row.get("availability_next_check_at"),
+        "availability_notes": row.get("availability_notes"),
         "duplicate_key": row.get("duplicate_key") or build_duplicate_key(row.get("company"), row.get("role_title"), row.get("location")),
     }
 
@@ -210,11 +276,18 @@ def job_record_from_tracker_row(row: dict[str, Any]) -> JobRecord:
         careers_url=row.get("careers_url"),
         salary=row.get("salary"),
         remote_or_local=normalize_remote_or_local_value(row.get("remote_or_local")),
-        fit_score=row.get("fit_score"),
+        fit_score=optional_int(row.get("fit_score")),
         match_summary=row.get("match_summary"),
-        required_experience_years=row.get("required_experience_years"),
-        candidate_experience_years=row.get("candidate_experience_years"),
-        experience_gap_years=row.get("experience_gap_years"),
+        required_experience_years=optional_float(row.get("required_experience_years")),
+        candidate_experience_years=optional_float(row.get("candidate_experience_years")),
+        experience_gap_years=optional_float(row.get("experience_gap_years")),
+        checked_url=row.get("checked_url"),
+        link_check_status=row.get("link_check_status"),
+        link_checked_at=row.get("link_checked_at"),
+        availability_status=row.get("availability_status"),
+        availability_checked_at=row.get("availability_checked_at"),
+        availability_next_check_at=row.get("availability_next_check_at"),
+        availability_notes=row.get("availability_notes"),
         duplicate_key=row.get("duplicate_key") or build_duplicate_key(row.get("company"), row.get("role_title"), row.get("location")),
         reason=row.get("notes"),
     )
@@ -350,6 +423,66 @@ def infer_posting_age_days(job: dict[str, Any]) -> int | None:
     return max((utc_now() - posted_at).days, 0)
 
 
+def tracker_row_is_due_for_availability_check(row: dict[str, Any], *, reference: datetime | None = None) -> bool:
+    if not row.get("posting_url") and not row.get("careers_url"):
+        return False
+
+    normalized_status = normalize_text(row.get("status"))
+    if normalized_status in AVAILABILITY_RECHECK_SKIP_STATUSES:
+        return False
+
+    current = reference or utc_now()
+    checked_at = parse_date(row.get("availability_checked_at") or row.get("link_checked_at"))
+    if checked_at is None:
+        return True
+    return checked_at <= current - timedelta(days=AVAILABILITY_RECHECK_DAYS)
+
+
+def tracker_rows_due_for_availability_check(
+    tracker_rows: list[dict[str, Any]],
+    *,
+    reference: datetime | None = None,
+) -> list[dict[str, Any]]:
+    return [row for row in tracker_rows if tracker_row_is_due_for_availability_check(row, reference=reference)]
+
+
+def tracker_status_from_availability(row: dict[str, Any], check: dict[str, Any]) -> str | None:
+    normalized_status = normalize_text(row.get("status"))
+    if normalized_status not in AVAILABILITY_STATUS_UPDATE_STATUSES:
+        return None
+    if check.get("availability_status") == "unavailable":
+        return "Unavailable"
+    if check.get("link_status") == "invalid":
+        return "Link Invalid"
+    return None
+
+
+def build_tracker_row_from_availability_check(row: dict[str, Any], check: dict[str, Any]) -> dict[str, Any]:
+    note_lines = [
+        f"Availability check: link={check.get('link_status')}, availability={check.get('availability_status')}",
+    ]
+    if check.get("reason"):
+        note_lines.append(str(check["reason"]))
+
+    return {
+        "company": row.get("company"),
+        "role_title": row.get("role_title"),
+        "location": row.get("location"),
+        "posting_url": row.get("posting_url"),
+        "careers_url": row.get("careers_url"),
+        "checked_url": check.get("checked_url"),
+        "link_check_status": check.get("link_status"),
+        "link_checked_at": check.get("checked_at"),
+        "availability_status": check.get("availability_status"),
+        "availability_checked_at": check.get("checked_at"),
+        "availability_next_check_at": check.get("next_check_at"),
+        "availability_notes": check.get("reason"),
+        "status": tracker_status_from_availability(row, check),
+        "notes": "\n".join(note_lines),
+        "duplicate_key": row.get("duplicate_key") or build_duplicate_key(row.get("company"), row.get("role_title"), row.get("location")),
+    }
+
+
 def source_bonus(source: str | None) -> int:
     bonuses = {
         "company_sites": 5,
@@ -446,7 +579,7 @@ def build_decision_record(
         source=job.get("source"),
         action=action,
         final_score=final_score,
-        base_fit_score=int(fit.get("fit_score") or 0),
+        base_fit_score=optional_int(fit.get("fit_score")) or 0,
         freshness_bonus=freshness_points,
         source_bonus=source_points,
         strategy_bonus=strategy_points,
@@ -467,10 +600,11 @@ def decide_job_action(
     snapshot: StrategySnapshot,
 ) -> tuple[DecisionAction, int, str, int, int, int, int]:
     thresholds = resolve_decision_thresholds(candidate_profile)
-    base_fit_score = int(fit.get("fit_score") or 0)
+    base_fit_score = optional_int(fit.get("fit_score")) or 0
 
     salary_min = job.get("salary_min")
-    if salary_min is not None and int(salary_min) < int(candidate_profile["salary_floor"]):
+    normalized_salary_min = optional_int(salary_min)
+    if normalized_salary_min is not None and normalized_salary_min < int(candidate_profile["salary_floor"]):
         return "skip", base_fit_score, "Listed salary is below the configured floor.", 0, 0, 0, 0
 
     freshness_points, stale_skip = freshness_bonus(job, base_fit_score)
@@ -835,16 +969,27 @@ class JobSearchOrchestrator:
         resume_version: str | None = None,
         cover_letter_version: str | None = None,
     ) -> None:
-        if action not in {"prioritize", "track"}:
+        if action not in TRACKER_MATERIAL_ACTIONS:
             return
-        next_steps = (
-            "Use the tailored resume and cover letter for application prep."
-            if action == "prioritize"
-            else "Use the tailored resume and cover letter, then track and monitor for updates."
-        )
+        if not resume_version or not cover_letter_version:
+            self._append_tracker_write_failure(
+                output,
+                kind="application_materials_missing",
+                reason="A new job was kept, but tracker sync was skipped because both generated material versions are required.",
+                details=f"resume_version={resume_version or 'missing'}, cover_letter_version={cover_letter_version or 'missing'}",
+                company=job.company,
+                role_title=job.role_title,
+            )
+            return
+        next_steps_by_action = {
+            "prioritize": "Use the tailored resume and cover letter for application prep.",
+            "track": "Use the tailored resume and cover letter, then track and monitor for updates.",
+            "queue_review": "Review the fit, then use the tailored resume and cover letter if applying.",
+        }
         tracker_row = build_tracker_row_from_job(
             job,
-            next_steps=next_steps,
+            status="Needs Review" if action == "queue_review" else "New",
+            next_steps=next_steps_by_action[action],
             priority="high" if action == "prioritize" else "normal",
             resume_version=resume_version,
             cover_letter_version=cover_letter_version,
@@ -884,7 +1029,7 @@ class JobSearchOrchestrator:
         record: JobRecord,
         action: str,
     ) -> str | None:
-        if action not in {"prioritize", "track"}:
+        if action not in TRACKER_MATERIAL_ACTIONS:
             return None
         if not self.candidate_profile.get("resume_reference_documents"):
             return None
@@ -944,7 +1089,7 @@ class JobSearchOrchestrator:
         record: JobRecord,
         action: str,
     ) -> str | None:
-        if action not in {"prioritize", "track"}:
+        if action not in TRACKER_MATERIAL_ACTIONS:
             return None
         if not self.candidate_profile.get("resume_reference_documents"):
             return None
@@ -1008,7 +1153,7 @@ class JobSearchOrchestrator:
         merged_job = dict(job)
         for field in ("required_experience_years", "candidate_experience_years", "experience_gap_years"):
             existing_value = existing_row.get(field)
-            if existing_value not in (None, "", []):
+            if blank_to_none(existing_value) is not None:
                 merged_job[field] = existing_value
         return merged_job
 
@@ -1074,7 +1219,11 @@ class JobSearchOrchestrator:
                 "resume_version": resume_version if generate_resume else None,
                 "cover_letter_version": cover_letter_version if generate_cover_letter else None,
             }
-            if update_row["resume_version"] is None and update_row["cover_letter_version"] is None:
+            if (
+                update_row["resume_version"] is None
+                and update_row["cover_letter_version"] is None
+                and row.get("tailor_resume")
+            ):
                 continue
 
             result = upsert_tracker_row_impl(
@@ -1135,6 +1284,82 @@ class JobSearchOrchestrator:
             overwrite_existing=overwrite_existing,
             refresh_docs=refresh_docs,
         )
+
+    def run_availability_checks(self, *, refresh_docs: bool = True) -> WorkflowOutput:
+        output = WorkflowOutput()
+        sheet_result = read_tracker_sheet_impl(self.candidate_profile["sheet_url"])
+        tracker_rows = sheet_result.get("rows", []) if sheet_result.get("implemented", False) else []
+        due_rows = tracker_rows_due_for_availability_check(tracker_rows)
+        output.summary.jobs_reviewed = len(due_rows)
+
+        if not sheet_result.get("implemented", False):
+            append_review(
+                output,
+                kind="tracker_unavailable",
+                reason="Tracker rows could not be read for job availability checks.",
+                details=sheet_result.get("reason"),
+            )
+            if refresh_docs:
+                self._refresh_documentation("availability", output)
+            return output
+
+        for row in due_rows:
+            check = verify_job_availability_impl(tracker_row_to_job_payload(row))
+            update_row = build_tracker_row_from_availability_check(row, check)
+            result = upsert_tracker_row_impl(
+                sheet_url=self.candidate_profile["sheet_url"],
+                row=update_row,
+                duplicate_key=update_row["duplicate_key"] or "",
+                match_strategy="hybrid",
+            )
+            output.summary.availability_checks_processed += 1
+
+            if check.get("availability_status") == "unavailable" or check.get("link_status") == "invalid":
+                append_review(
+                    output,
+                    kind="job_availability_problem",
+                    reason="A tracked job link is invalid or the posting appears unavailable.",
+                    details=check.get("reason"),
+                    company=row.get("company"),
+                    role_title=row.get("role_title"),
+                )
+            elif check.get("link_status") in {"missing", "unknown"} or check.get("availability_status") == "unknown":
+                append_review(
+                    output,
+                    kind="job_availability_uncertain",
+                    reason="A tracked job could not be conclusively verified.",
+                    details=check.get("reason"),
+                    company=row.get("company"),
+                    role_title=row.get("role_title"),
+                )
+
+            if not result.get("implemented", False):
+                self._append_tracker_write_failure(
+                    output,
+                    kind="availability_tracker_update_failed",
+                    reason="A job availability check could not be written back to Google Sheets.",
+                    details=result.get("reason"),
+                    company=row.get("company"),
+                    role_title=row.get("role_title"),
+                )
+                continue
+
+            self._record_tracker_update(
+                output,
+                persisted_row=result.get("row") or update_row,
+                fallback_row=update_row,
+                update_type="availability_check",
+                notes=update_row.get("notes"),
+                company=row.get("company"),
+                role_title=row.get("role_title"),
+                duplicate_key=update_row.get("duplicate_key"),
+            )
+
+        if output.summary.availability_checks_processed:
+            output.assistant_response = f"Rechecked {output.summary.availability_checks_processed} tracked job postings for link health and availability."
+        if refresh_docs:
+            self._refresh_documentation("availability", output)
+        return output
 
     def run_jobs(self, *, refresh_docs: bool = True) -> WorkflowOutput:
         output = WorkflowOutput()
@@ -1440,6 +1665,7 @@ class JobSearchOrchestrator:
 
     def run_daily(self) -> WorkflowOutput:
         jobs_output = self.run_jobs(refresh_docs=False)
+        availability_output = self.run_availability_checks(refresh_docs=False)
         gmail_output = self.run_gmail(refresh_docs=False)
         reflect_output = self.run_reflect(refresh_docs=False)
         merged = WorkflowOutput(
@@ -1448,15 +1674,16 @@ class JobSearchOrchestrator:
             gmail_updates=[*gmail_output.gmail_updates],
             resume_artifacts=[*jobs_output.resume_artifacts],
             cover_letter_artifacts=[*jobs_output.cover_letter_artifacts],
-            tracker_updates=[*jobs_output.tracker_updates, *gmail_output.tracker_updates],
+            tracker_updates=[*jobs_output.tracker_updates, *availability_output.tracker_updates, *gmail_output.tracker_updates],
             qa_results=[*jobs_output.qa_results, *gmail_output.qa_results, *reflect_output.qa_results],
             documentation_updates=[],
-            needs_review=[*jobs_output.needs_review, *gmail_output.needs_review, *reflect_output.needs_review],
+            needs_review=[*jobs_output.needs_review, *availability_output.needs_review, *gmail_output.needs_review, *reflect_output.needs_review],
             follow_up_questions=[],
-            assistant_response=reflect_output.assistant_response or gmail_output.assistant_response or jobs_output.assistant_response,
+            assistant_response=reflect_output.assistant_response or gmail_output.assistant_response or availability_output.assistant_response or jobs_output.assistant_response,
         )
+        merged.summary.availability_checks_processed += availability_output.summary.availability_checks_processed
         merged.summary.gmail_updates_processed += gmail_output.summary.gmail_updates_processed
-        merged.summary.tracker_rows_updated += gmail_output.summary.tracker_rows_updated
+        merged.summary.tracker_rows_updated += availability_output.summary.tracker_rows_updated + gmail_output.summary.tracker_rows_updated
         merged.summary.jobs_reviewed = jobs_output.summary.jobs_reviewed
         merged.summary.jobs_added = jobs_output.summary.jobs_added
         merged.summary.duplicates_skipped = jobs_output.summary.duplicates_skipped

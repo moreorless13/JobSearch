@@ -7,6 +7,7 @@ from job_agent.docs.service import DocumentationService
 from job_agent.models import WorkflowOutput
 from job_agent.state import NullStateStore, StateStoreStatus, build_default_goal_state, build_default_strategy_snapshot
 from job_agent.workflows import (
+    run_availability_workflow,
     run_backfill_cover_letters_workflow,
     run_backfill_materials_workflow,
     run_backfill_resumes_workflow,
@@ -141,6 +142,17 @@ def patch_docs_service(monkeypatch, tmp_path) -> None:
 def test_run_jobs_workflow_uses_decision_engine_and_tracker_sync(monkeypatch, tmp_path) -> None:
     store = FakeStateStore()
     tracker_rows_written = []
+    profile = {
+        **PROFILE,
+        "resume_reference_documents": [
+            {
+                "label": "Solutions Engineer Resume",
+                "version": "v1.0",
+                "path": "/tmp/solutions.docx",
+                "kind": "resume",
+            }
+        ],
+    }
     patch_store(monkeypatch, store)
     patch_docs_service(monkeypatch, tmp_path)
     monkeypatch.setattr("job_agent.orchestrator.read_tracker_sheet_impl", lambda _sheet_url: {"implemented": True, "rows": []})
@@ -166,9 +178,11 @@ def test_run_jobs_workflow_uses_decision_engine_and_tracker_sync(monkeypatch, tm
                     "role_title": "Integration Engineer",
                     "location": "Remote - US",
                     "source": "linkedin",
-                    "posting_url": "",
+                    "posting_url": "https://example.com/jobs/2",
                     "remote_or_local": "remote",
                     "posting_age_days": 10,
+                    "salary_min": 70000,
+                    "description": "Own API integrations, implementation, and payments onboarding.",
                     "duplicate_key": "beta::integration engineer::remote us",
                 },
             ],
@@ -180,9 +194,37 @@ def test_run_jobs_workflow_uses_decision_engine_and_tracker_sync(monkeypatch, tm
     def fake_score_job_fit(job, _candidate_profile):
         if job["company"] == "Acme":
             return {"fit_score": 82, "fit_band": "strong", "reason": "strong fit"}
-        return {"fit_score": 64, "fit_band": "maybe", "reason": "borderline fit"}
+        return {"fit_score": 60, "fit_band": "maybe", "reason": "borderline fit"}
 
     monkeypatch.setattr("job_agent.orchestrator.score_job_fit_impl", fake_score_job_fit)
+    monkeypatch.setattr(
+        "job_agent.orchestrator.generate_resume_artifact_impl",
+        lambda **kwargs: {
+            "implemented": True,
+            "artifact": {
+                "company": kwargs["job"]["company"],
+                "role_title": kwargs["job"]["role_title"],
+                "version": "v1.0",
+                "output_path": str(tmp_path / "resume.md"),
+                "format": "markdown",
+                "source_labels": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.generate_cover_letter_artifact_impl",
+        lambda **kwargs: {
+            "implemented": True,
+            "artifact": {
+                "company": kwargs["job"]["company"],
+                "role_title": kwargs["job"]["role_title"],
+                "version": "v1.0",
+                "output_path": str(tmp_path / "cover-letter.md"),
+                "format": "markdown",
+                "source_labels": [],
+            },
+        },
+    )
 
     def fake_upsert_tracker_row(**kwargs):
         tracker_rows_written.append(kwargs["row"])
@@ -190,18 +232,21 @@ def test_run_jobs_workflow_uses_decision_engine_and_tracker_sync(monkeypatch, tm
 
     monkeypatch.setattr("job_agent.orchestrator.upsert_tracker_row_impl", fake_upsert_tracker_row)
 
-    result = run_jobs_workflow(PROFILE)
+    result = run_jobs_workflow(profile)
 
     assert isinstance(result, WorkflowOutput)
     assert result.summary.jobs_reviewed == 4
     assert result.summary.jobs_added == 2
-    assert result.summary.tracker_rows_updated == 1
+    assert result.summary.tracker_rows_updated == 2
     assert result.summary.qa_evaluations == 2
     assert len(result.new_jobs) == 2
     assert len(result.documentation_updates) == 5
     assert {decision.action for decision in store.decisions} == {"prioritize", "queue_review"}
     assert any(item.kind == "job_requires_review" for item in result.needs_review)
-    assert tracker_rows_written[0]["tailor_resume"] == "yes"
+    assert all(row["tailor_resume"] == "yes" for row in tracker_rows_written)
+    assert all(row["resume_version"] == "v1.0" for row in tracker_rows_written)
+    assert all(row["cover_letter_version"] == "v1.0" for row in tracker_rows_written)
+    assert any(row["status"] == "Needs Review" for row in tracker_rows_written)
     assert isinstance(store.documentation_state, DocumentationStateSnapshot)
 
 
@@ -371,6 +416,49 @@ def test_run_jobs_workflow_generates_resume_artifact_for_tailored_jobs(monkeypat
     assert tracker_rows_written[0]["cover_letter_version"] == "v1.0"
 
 
+def test_run_jobs_workflow_skips_tracker_write_without_material_versions(monkeypatch, tmp_path) -> None:
+    store = FakeStateStore()
+    writes = []
+    patch_store(monkeypatch, store)
+    patch_docs_service(monkeypatch, tmp_path)
+    monkeypatch.setattr("job_agent.orchestrator.read_tracker_sheet_impl", lambda _sheet_url: {"implemented": True, "rows": []})
+    monkeypatch.setattr(
+        "job_agent.orchestrator.search_jobs_impl",
+        lambda **_kwargs: {
+            "implemented": True,
+            "jobs": [
+                {
+                    "company": "Acme",
+                    "role_title": "Solutions Engineer",
+                    "location": "Remote - US",
+                    "source": "company_sites",
+                    "posting_url": "https://example.com/jobs/1",
+                    "remote_or_local": "remote",
+                    "posting_age_days": 3,
+                    "duplicate_key": "acme::solutions engineer::remote us",
+                }
+            ],
+            "summary": {"jobs_reviewed": 1, "duplicates_skipped": 0},
+            "notes": [],
+        },
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.score_job_fit_impl",
+        lambda *_args, **_kwargs: {"fit_score": 82, "fit_band": "strong", "reason": "strong fit"},
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.upsert_tracker_row_impl",
+        lambda **kwargs: writes.append(kwargs) or {"implemented": True, "status": "updated", "row": kwargs["row"]},
+    )
+
+    result = run_jobs_workflow(PROFILE)
+
+    assert result.summary.jobs_added == 1
+    assert result.summary.tracker_rows_updated == 0
+    assert writes == []
+    assert any(item.kind == "application_materials_missing" for item in result.needs_review)
+
+
 def test_backfill_materials_workflow_generates_for_tracker_rows(monkeypatch, tmp_path) -> None:
     store = FakeStateStore()
     tracker_rows_written = []
@@ -465,6 +553,79 @@ def test_backfill_materials_workflow_generates_for_tracker_rows(monkeypatch, tmp
     assert all(row["cover_letter_version"] == "v1.0" for row in tracker_rows_written)
 
 
+def test_backfill_materials_workflow_tolerates_blank_legacy_numeric_tracker_fields(monkeypatch, tmp_path) -> None:
+    tracker_payloads = []
+    patch_store(monkeypatch, FakeStateStore())
+    patch_docs_service(monkeypatch, tmp_path)
+    profile = {
+        **PROFILE,
+        "resume_reference_documents": [
+            {
+                "label": "Solutions Engineer Resume",
+                "version": "v1.0",
+                "path": "/tmp/solutions.docx",
+                "kind": "resume",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "job_agent.orchestrator.read_tracker_sheet_impl",
+        lambda _sheet_url: {
+            "implemented": True,
+            "rows": [
+                {
+                    "company": "Acme",
+                    "role_title": "Solutions Engineer",
+                    "location": "Remote - US",
+                    "source": "company_sites",
+                    "posting_url": "https://example.com/jobs/1",
+                    "remote_or_local": "remote",
+                    "fit_score": "",
+                    "required_experience_years": " ",
+                    "candidate_experience_years": "",
+                    "experience_gap_years": "",
+                    "match_summary": "legacy row with blank scoring fields",
+                    "duplicate_key": "acme::solutions engineer::remote us",
+                }
+            ],
+        },
+    )
+
+    def fake_generate_resume_artifact_impl(**kwargs):
+        tracker_payloads.append(kwargs["job"])
+        return {
+            "implemented": True,
+            "artifact": {
+                "company": "Acme",
+                "role_title": "Solutions Engineer",
+                "version": "v1.0",
+                "output_path": str(tmp_path / "resume.md"),
+                "format": "markdown",
+                "source_labels": [],
+            },
+        }
+
+    monkeypatch.setattr("job_agent.orchestrator.generate_resume_artifact_impl", fake_generate_resume_artifact_impl)
+    monkeypatch.setattr(
+        "job_agent.orchestrator.generate_cover_letter_artifact_impl",
+        lambda **_kwargs: {"implemented": False, "reason": "not needed for this assertion"},
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.upsert_tracker_row_impl",
+        lambda **kwargs: {"implemented": True, "status": "updated", "row": kwargs["row"]},
+    )
+
+    result = run_backfill_resumes_workflow(profile)
+
+    assert result.summary.jobs_reviewed == 1
+    assert result.summary.tracker_rows_updated == 1
+    assert len(result.resume_artifacts) == 1
+    assert tracker_payloads[0]["fit_score"] is None
+    assert tracker_payloads[0]["required_experience_years"] is None
+    assert tracker_payloads[0]["candidate_experience_years"] is None
+    assert tracker_payloads[0]["experience_gap_years"] is None
+
+
 def test_backfill_single_material_workflows_update_only_requested_version(monkeypatch, tmp_path) -> None:
     profile = {
         **PROFILE,
@@ -540,6 +701,56 @@ def test_backfill_single_material_workflows_update_only_requested_version(monkey
     assert len(cover_letter_result.cover_letter_artifacts) == 1
     assert tracker_rows_written[1]["resume_version"] is None
     assert tracker_rows_written[1]["cover_letter_version"] == "v1.0"
+
+
+def test_run_availability_workflow_rechecks_due_rows(monkeypatch, tmp_path) -> None:
+    store = FakeStateStore()
+    writes = []
+    patch_store(monkeypatch, store)
+    patch_docs_service(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "job_agent.orchestrator.read_tracker_sheet_impl",
+        lambda _sheet_url: {
+            "implemented": True,
+            "rows": [
+                {
+                    "company": "Acme",
+                    "role_title": "Solutions Engineer",
+                    "location": "Remote",
+                    "status": "New",
+                    "posting_url": "https://example.com/jobs/1",
+                    "availability_checked_at": "2026-01-01T00:00:00Z",
+                    "duplicate_key": "acme::solutions engineer::remote",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "job_agent.orchestrator.verify_job_availability_impl",
+        lambda _job: {
+            "checked_url": "https://example.com/jobs/1",
+            "link_status": "valid",
+            "availability_status": "unavailable",
+            "checked_at": "2026-01-10T00:00:00Z",
+            "next_check_at": "2026-01-13T00:00:00Z",
+            "reason": "job is no longer available",
+        },
+    )
+
+    def fake_upsert_tracker_row(**kwargs):
+        writes.append(kwargs["row"])
+        return {"implemented": True, "status": "updated", "row": kwargs["row"]}
+
+    monkeypatch.setattr("job_agent.orchestrator.upsert_tracker_row_impl", fake_upsert_tracker_row)
+
+    result = run_availability_workflow(PROFILE)
+
+    assert result.summary.jobs_reviewed == 1
+    assert result.summary.availability_checks_processed == 1
+    assert result.summary.tracker_rows_updated == 1
+    assert writes[0]["status"] == "Unavailable"
+    assert writes[0]["availability_next_check_at"] == "2026-01-13T00:00:00Z"
+    assert any(item.kind == "job_availability_problem" for item in result.needs_review)
 
 
 def test_run_gmail_workflow_records_outcomes_and_immediate_review(monkeypatch, tmp_path) -> None:

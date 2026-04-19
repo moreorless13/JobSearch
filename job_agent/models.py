@@ -25,6 +25,7 @@ class SummaryCounts(BaseModel):
     jobs_reviewed: int = 0
     jobs_added: int = 0
     duplicates_skipped: int = 0
+    availability_checks_processed: int = 0
     gmail_updates_processed: int = 0
     tracker_rows_updated: int = 0
     qa_evaluations: int = 0
@@ -47,6 +48,13 @@ class JobRecord(BaseModel):
     required_experience_years: float | None = None
     candidate_experience_years: float | None = None
     experience_gap_years: float | None = None
+    checked_url: str | None = None
+    link_check_status: str | None = None
+    link_checked_at: str | None = None
+    availability_status: str | None = None
+    availability_checked_at: str | None = None
+    availability_next_check_at: str | None = None
+    availability_notes: str | None = None
     duplicate_key: str | None = None
     reason: str | None = None
 
