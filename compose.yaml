@@ -1,12 +1,25 @@
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 1s
+      retries: 20
+
   jobsearch:
     build:
       context: .
+    depends_on:
+      redis:
+        condition: service_healthy
     env_file:
       - .env
     environment:
       GOOGLE_SERVICE_ACCOUNT_FILE: /var/secrets/google/application_default_credentials.json
-      REDIS_URL: ${DOCKER_REDIS_URL:-redis://host.docker.internal:6379/0}
+      REDIS_URL: ${DOCKER_REDIS_URL:-redis://redis:6379/0}
     volumes:
       - ${GOOGLE_ADC_FILE:?Set GOOGLE_ADC_FILE to your local ADC JSON path}:/var/secrets/google/application_default_credentials.json:ro
     command: ["--workflow", "${JOBSEARCH_WORKFLOW:-daily}"]

@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
+import pytest
+
+import app as app_module
 from app import run_free_form_workflow
+from job_agent.redis_preflight import RedisPreflightError
 
 
 PROFILE = {
@@ -129,3 +133,28 @@ def test_run_free_form_workflow_adds_review_after_follow_up_loop_limit() -> None
 
     assert len(result.needs_review) == 1
     assert result.needs_review[0].kind == "follow_up_loop_limit"
+
+
+def test_main_exits_before_workflow_when_redis_preflight_fails(monkeypatch, capsys) -> None:
+    def fail_preflight():
+        raise RedisPreflightError(
+            "Redis preflight failed: could not connect to redis://redis:6379/0: connection refused",
+            start_command="docker compose up -d redis",
+        )
+
+    monkeypatch.setattr(app_module.dotenv_module, "load_dotenv", lambda: None)
+    monkeypatch.setattr(app_module, "parse_args", lambda: SimpleNamespace(workflow="daily", input=None, explain=None))
+    monkeypatch.setattr(app_module, "run_redis_preflight", fail_preflight)
+    monkeypatch.setattr(
+        app_module,
+        "load_candidate_profile",
+        lambda: pytest.fail("candidate profile should not load after Redis preflight failure"),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        app_module.main()
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 1
+    assert "Redis preflight failed" in captured.err
+    assert "Start Redis with: docker compose up -d redis" in captured.err

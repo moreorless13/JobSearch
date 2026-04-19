@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Any, cast
 
 import dotenv as dotenv_module
@@ -9,6 +10,7 @@ import dotenv as dotenv_module
 from job_agent.config import load_candidate_profile
 from job_agent.docs.service import ExplainService
 from job_agent.models import ReviewItem, WorkflowOutput, normalize_workflow_output
+from job_agent.redis_preflight import RedisPreflightError, run_redis_preflight
 from job_agent.state import RedisStateStore
 from job_agent.workflows import run_preset_workflow
 
@@ -94,6 +96,12 @@ def build_cli_payload(args: argparse.Namespace, candidate_profile: dict[str, Any
 def main() -> None:
     cast(Any, dotenv_module).load_dotenv()
     args = parse_args()
+    try:
+        run_redis_preflight()
+    except RedisPreflightError as exc:
+        print(str(exc), file=sys.stderr)
+        print(f"Start Redis with: {exc.start_command}", file=sys.stderr)
+        raise SystemExit(1) from exc
     candidate_profile = load_candidate_profile()
     payload = build_cli_payload(args, candidate_profile)
     print(json.dumps(payload, indent=2, sort_keys=True))

@@ -7,7 +7,7 @@ Run the preset workflows through `python app.py --workflow <daily|jobs|availabil
 ## Decision Rules
 
 - Salary floor: `65000`
-- Thresholds: `{'prioritize': 70, 'track': 50, 'queue_review': 60, 'stale_days': 21}`
+- Thresholds: `{'prioritize': 85, 'track': 70, 'queue_review': 60, 'stale_days': 21}`
 - Follow-up delay: `3` business days
 - Job availability recheck interval: `3` days
 - Search sources: `linkedin, indeed, ziprecruiter, greenhouse, lever, workday, ashby, smartrecruiters, google_jobs, company_sites`

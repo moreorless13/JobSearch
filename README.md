@@ -25,7 +25,7 @@ Implemented today:
 - Job search is live through OpenAI web search
 - Google Sheets works with Application Default Credentials or service-account credentials and supports Workspace domain-wide delegation
 - Gmail search is implemented through the Gmail API with Workspace domain-wide delegation, using ADC or service-account credentials
-- Redis-backed goal state, plan runs, decisions, outcomes, follow-up tasks, and reflection snapshots are supported when `REDIS_URL` is configured
+- Redis-backed goal state, plan runs, decisions, outcomes, follow-up tasks, and reflection snapshots are required for CLI workflow startup
 - Preset workflows `daily`, `jobs`, `gmail`, and `reflect` return structured JSON
 - Preset workflows now run through a shared deterministic orchestrator with supervisor-mode guardrails
 - Job intake uses deterministic decision scoring for `prioritize`, `track`, `queue_review`, and `skip`
@@ -44,7 +44,7 @@ Still incomplete:
 
 - No auto-apply behavior exists
 - No outbound email behavior exists
-- If Redis is unavailable, the app falls back to stateless mode and reports degraded orchestration in `needs_review`
+- If Redis is unavailable, the CLI preflight exits before running and prints the Docker or Compose command to start Redis
 - Search quality depends on model/web-search variability, so results can differ between runs
 - Semantic memory and embeddings are not implemented yet
 - Gmail requires Google Workspace domain-wide delegation before it can read mail
@@ -62,11 +62,11 @@ Required `.env` values:
 
 - `OPENAI_API_KEY`
 - `JOB_TRACKER_SHEET_URL`
+- `REDIS_URL`, for example `redis://localhost:6379/0`
 
 Optional `.env` values:
 
 - `OPENAI_MODEL` defaults to `gpt-4.1-mini`
-- `REDIS_URL` enables Redis-backed orchestration state. Example: `redis://localhost:6379/0`
 - `GMAIL_SEARCH_MAX_RESULTS` defaults to `25`
 - `RESUME_TEMPLATE_DOCX_PATH` points to the Word resume template used when generating formatted DOCX and Google Doc resumes
 - `COVER_LETTER_TEMPLATE_DOCX_PATH` points to a sample cover letter used for cover letter DOCX formatting and writing-style reference
@@ -166,14 +166,14 @@ This repository is currently a CLI workload, so Google Cloud deployment should t
 
 Recommended deployment order:
 
-1. Enable the required Google Cloud APIs: Cloud Run, Cloud Build, Artifact Registry, Secret Manager, Gmail API, Sheets API, and Redis API if you want Memorystore.
+1. Enable the required Google Cloud APIs: Cloud Run, Cloud Build, Artifact Registry, Secret Manager, Gmail API, Sheets API, and Redis API.
 2. Confirm Google Workspace domain-wide delegation is authorized for the service account client ID with at least `https://www.googleapis.com/auth/gmail.readonly`, `https://www.googleapis.com/auth/spreadsheets`, and `https://www.googleapis.com/auth/drive.file`.
 3. Create an Artifact Registry Docker repository.
 4. Create a Secret Manager secret for `OPENAI_API_KEY`. A Google credential secret is not required for the recommended keyless ADC path.
 5. Build and push the container image with `gcloud builds submit`.
-6. Provision Memorystore for Redis if you want Redis-backed orchestration state. Otherwise omit `REDIS_URL` and the app will run in degraded stateless mode.
+6. Provision Memorystore for Redis.
 7. Attach the correct service account to the Cloud Run Job and grant it `Service Account Token Creator` on the delegated target account if required for your impersonation setup.
-8. Create a Cloud Run Job that sets `JOB_TRACKER_SHEET_URL`, `GOOGLE_DELEGATED_USER`, and any optional `REDIS_URL`. Set `RESUME_GOOGLE_DRIVE_FOLDER_ID` when resume and cover letter Google Docs should be published to Drive. Set `GOOGLE_SERVICE_ACCOUNT_EMAIL` if the runtime cannot infer it automatically.
+8. Create a Cloud Run Job that sets `JOB_TRACKER_SHEET_URL`, `GOOGLE_DELEGATED_USER`, and `REDIS_URL`. Set `RESUME_GOOGLE_DRIVE_FOLDER_ID` when resume and cover letter Google Docs should be published to Drive. Set `GOOGLE_SERVICE_ACCOUNT_EMAIL` if the runtime cannot infer it automatically.
 9. Execute the job and inspect the first execution logs before scheduling it.
 
 Typical production env for the Cloud Run Job:

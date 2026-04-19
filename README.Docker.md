@@ -15,8 +15,14 @@ Run the local workflow with your Google ADC file mounted automatically:
 The helper script expects your ADC file at `~/.config/gcloud/application_default_credentials.json`.
 Override that path with `GOOGLE_ADC_FILE=/absolute/path/to/credentials.json`.
 
-Redis defaults to `redis://host.docker.internal:6379/0` for local Docker runs.
-Override that with `DOCKER_REDIS_URL=redis://HOST:6379/0` if needed.
+Redis defaults to `redis://host.docker.internal:6379/0` for `scripts/docker-run-local.sh`.
+Start local Redis with:
+
+```bash
+docker run --name jobsearch-redis -p 6379:6379 -d redis:7-alpine
+```
+
+Override the Redis URL with `DOCKER_REDIS_URL=redis://HOST:6379/0` if needed.
 
 You can also use Compose:
 
@@ -25,6 +31,13 @@ export GOOGLE_ADC_FILE="$HOME/.config/gcloud/application_default_credentials.jso
 docker compose run --rm jobsearch
 docker compose run --rm jobsearch --workflow gmail
 docker compose run --rm jobsearch --workflow availability
+```
+
+Compose includes a Redis service and defaults `REDIS_URL` to `redis://redis:6379/0`.
+Start Redis for Compose with:
+
+```bash
+docker compose up -d redis
 ```
 
 ### Deploying your application to the cloud

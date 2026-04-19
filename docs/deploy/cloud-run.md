@@ -10,7 +10,7 @@ If you want a request-driven API on Cloud Run services later, add an HTTP server
 - `JOB_TRACKER_SHEET_URL`
 - `GOOGLE_DELEGATED_USER` when using Google Workspace domain-wide delegation
 - `GOOGLE_SERVICE_ACCOUNT_EMAIL` when delegated ADC cannot infer the runtime service account automatically
-- `REDIS_URL` if you want Redis-backed state instead of degraded stateless mode
+- `REDIS_URL`
 
 For the recommended Cloud Run setup, you do **not** need:
 
@@ -28,7 +28,7 @@ The current code uses:
 - **Cloud Run Job** for execution
 - **Artifact Registry** for the container image
 - **Secret Manager** for `OPENAI_API_KEY`
-- **Memorystore for Redis** if you want persistent orchestration state
+- **Memorystore for Redis** for persistent orchestration state
 - **Google Sheets API** enabled in the same project as the service account
 - **Gmail API** enabled and domain-wide delegation authorized in Google Workspace Admin
 - **Google Drive API** enabled when publishing generated resumes as Google Docs
@@ -78,7 +78,7 @@ Notes:
 - Use `--args="--workflow","gmail"` for Gmail sync.
 - Use `--args="--workflow","reflect"` for strategy reflection.
 - Use `--args="--workflow","backfill-materials"` for a one-off tracker pass that generates resumes and cover letters for existing rows.
-- If you do not want Redis yet, omit `REDIS_URL` and the app will run in degraded stateless mode.
+- Redis is checked during CLI startup. If `REDIS_URL` is missing or unreachable, the job exits before running the workflow.
 - Do not set `GOOGLE_APPLICATION_CREDENTIALS` on Cloud Run for the recommended keyless path.
 - Tailored resume drafts under `output/doc/resumes/` and cover letters under `output/doc/cover_letters/` live on the job's ephemeral filesystem unless Drive publishing is configured.
 
@@ -106,7 +106,7 @@ Recommended:
 - Attach the Cloud Run job to the same network path required to reach the Redis instance
 - Set `REDIS_URL` to the Memorystore host and port
 
-If you leave Redis out, the job still runs, but orchestration history and reflection state fall back to degraded stateless mode.
+If Redis is missing or unreachable, the job exits during startup before workflow execution.
 
 ## Execute The Job
 
